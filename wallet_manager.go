@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"math/rand"
+	"runtime"
 	"sync"
 	"time"
 
@@ -254,31 +256,150 @@ func (wm *WalletManager) initNetwork(network networks.Network) (err error) {
 }
 
 func (wm *WalletManager) setPendingNonce(wallet common.Address, network networks.Network, nonce uint64) {
+	// Generate unique operation ID for race detection
+	opID := rand.Int63()
+	
+	logger.WithFields(logger.Fields{
+		"op_id":      opID,
+		"method":     "setPendingNonce",
+		"wallet":     wallet.Hex(),
+		"chain_id":   network.GetChainID(),
+		"new_nonce":  nonce,
+		"phase":      "acquiring_lock",
+	}).Debug("[RACE_DETECT] Attempting to set pending nonce")
+	
 	wm.lock.Lock()
-	defer wm.lock.Unlock()
+	
+	logger.WithFields(logger.Fields{
+		"op_id":      opID,
+		"method":     "setPendingNonce",
+		"wallet":     wallet.Hex(),
+		"chain_id":   network.GetChainID(),
+		"phase":      "lock_acquired",
+	}).Debug("[RACE_DETECT] Lock acquired")
+	
+	defer func() {
+		logger.WithFields(logger.Fields{
+			"op_id":      opID,
+			"method":     "setPendingNonce",
+			"wallet":     wallet.Hex(),
+			"chain_id":   network.GetChainID(),
+			"phase":      "releasing_lock",
+		}).Debug("[RACE_DETECT] Releasing lock")
+		wm.lock.Unlock()
+	}()
+	
 	walletNonces := wm.pendingNonces[wallet]
 	if walletNonces == nil {
 		walletNonces = map[uint64]*big.Int{}
 		wm.pendingNonces[wallet] = walletNonces
 	}
 	oldNonce := walletNonces[network.GetChainID()]
+	
+	logger.WithFields(logger.Fields{
+		"op_id":      opID,
+		"method":     "setPendingNonce",
+		"wallet":     wallet.Hex(),
+		"chain_id":   network.GetChainID(),
+		"old_nonce":  oldNonce,
+		"new_nonce":  nonce,
+		"phase":      "checking_nonce",
+	}).Debug("[RACE_DETECT] Checking if nonce should be updated")
+	
 	if oldNonce != nil && oldNonce.Cmp(big.NewInt(int64(nonce))) >= 0 {
+		logger.WithFields(logger.Fields{
+			"op_id":      opID,
+			"method":     "setPendingNonce",
+			"wallet":     wallet.Hex(),
+			"chain_id":   network.GetChainID(),
+			"old_nonce":  oldNonce.Uint64(),
+			"new_nonce":  nonce,
+			"phase":      "skipped_update",
+			"reason":     "old_nonce_higher_or_equal",
+		}).Warn("[RACE_DETECT] Skipped nonce update - potential race condition detected")
 		return
 	}
+	
 	walletNonces[network.GetChainID()] = big.NewInt(int64(nonce))
+	
+	logger.WithFields(logger.Fields{
+		"op_id":      opID,
+		"method":     "setPendingNonce",
+		"wallet":     wallet.Hex(),
+		"chain_id":   network.GetChainID(),
+		"old_nonce":  oldNonce,
+		"new_nonce":  nonce,
+		"phase":      "updated",
+	}).Info("[RACE_DETECT] Successfully updated pending nonce")
 }
 
 func (wm *WalletManager) pendingNonce(wallet common.Address, network networks.Network) *big.Int {
+	// Generate unique operation ID for race detection
+	opID := rand.Int63()
+	
+	logger.WithFields(logger.Fields{
+		"op_id":      opID,
+		"method":     "pendingNonce",
+		"wallet":     wallet.Hex(),
+		"chain_id":   network.GetChainID(),
+		"phase":      "acquiring_read_lock",
+	}).Debug("[RACE_DETECT] Attempting to read pending nonce")
+	
 	wm.lock.RLock()
-	defer wm.lock.RUnlock()
+	
+	logger.WithFields(logger.Fields{
+		"op_id":      opID,
+		"method":     "pendingNonce",
+		"wallet":     wallet.Hex(),
+		"chain_id":   network.GetChainID(),
+		"phase":      "read_lock_acquired",
+	}).Debug("[RACE_DETECT] Read lock acquired")
+	
+	defer func() {
+		logger.WithFields(logger.Fields{
+			"op_id":      opID,
+			"method":     "pendingNonce",
+			"wallet":     wallet.Hex(),
+			"chain_id":   network.GetChainID(),
+			"phase":      "releasing_read_lock",
+		}).Debug("[RACE_DETECT] Releasing read lock")
+		wm.lock.RUnlock()
+	}()
+	
 	walletPendingNonces := wm.pendingNonces[wallet]
 	if walletPendingNonces == nil {
+		logger.WithFields(logger.Fields{
+			"op_id":      opID,
+			"method":     "pendingNonce",
+			"wallet":     wallet.Hex(),
+			"chain_id":   network.GetChainID(),
+			"phase":      "no_nonce_found",
+		}).Debug("[RACE_DETECT] No pending nonce found for wallet")
 		return nil
 	}
 	result := walletPendingNonces[network.GetChainID()]
 	if result != nil {
 		// when there is a pending nonce, we add 1 to get the next nonce
+		original := result.Uint64()
 		result = big.NewInt(0).Add(result, big.NewInt(1))
+		
+		logger.WithFields(logger.Fields{
+			"op_id":      opID,
+			"method":     "pendingNonce",
+			"wallet":     wallet.Hex(),
+			"chain_id":   network.GetChainID(),
+			"stored_nonce": original,
+			"returned_nonce": result.Uint64(),
+			"phase":      "nonce_read",
+		}).Debug("[RACE_DETECT] Read pending nonce and incremented")
+	} else {
+		logger.WithFields(logger.Fields{
+			"op_id":      opID,
+			"method":     "pendingNonce",
+			"wallet":     wallet.Hex(),
+			"chain_id":   network.GetChainID(),
+			"phase":      "nonce_nil",
+		}).Debug("[RACE_DETECT] Pending nonce is nil for chain")
 	}
 	return result
 }
@@ -299,6 +420,16 @@ func (wm *WalletManager) pendingNonce(wallet common.Address, network networks.Ne
 //     5.3 if local > remote: means txs from this session are not broadcasted to the
 //     the notes, return local nonce and give warnings
 func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) (*big.Int, error) {
+	// Generate a unique ID for this nonce request to track it
+	requestID := fmt.Sprintf("nonce-%d-%d", time.Now().UnixNano(), rand.Int31())
+	
+	logger.WithFields(logger.Fields{
+		"request_id": requestID,
+		"wallet":     wallet.Hex(),
+		"network":    network.GetChainID(),
+		"goroutine":  getGoroutineID(),
+		"timestamp":  time.Now().UnixNano(),
+	}).Debug("[NONCE-RACE] Starting nonce calculation")
 
 	reader := wm.Reader(network)
 	minedNonce, err := reader.GetMinedNonce(wallet.Hex())
@@ -314,7 +445,23 @@ func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) 
 	var localPendingNonce uint64
 	localPendingNonceBig := wm.pendingNonce(wallet, network)
 
+	// Log the current state before making decisions
+	logger.WithFields(logger.Fields{
+		"request_id":          requestID,
+		"mined_nonce":         minedNonce,
+		"remote_pending_nonce": remotePendingNonce,
+		"local_pending_nonce":  localPendingNonceBig,
+		"goroutine":           getGoroutineID(),
+	}).Debug("[NONCE-RACE] Nonce values retrieved")
+
 	if localPendingNonceBig == nil {
+		logger.WithFields(logger.Fields{
+			"request_id":     requestID,
+			"setting_nonce":  remotePendingNonce,
+			"reason":         "local_pending_nil",
+			"goroutine":      getGoroutineID(),
+		}).Debug("[NONCE-RACE] Setting pending nonce (local was nil)")
+		
 		wm.setPendingNonce(wallet, network, remotePendingNonce)
 		localPendingNonce = remotePendingNonce
 	} else {
@@ -322,6 +469,16 @@ func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) 
 	}
 
 	hasPendingTxsOnNodes := minedNonce < remotePendingNonce
+	
+	logger.WithFields(logger.Fields{
+		"request_id":            requestID,
+		"has_pending_txs":       hasPendingTxsOnNodes,
+		"mined_nonce":          minedNonce,
+		"remote_pending_nonce": remotePendingNonce,
+		"local_pending_nonce":  localPendingNonce,
+		"goroutine":            getGoroutineID(),
+	}).Debug("[NONCE-RACE] Evaluating nonce logic")
+	
 	if !hasPendingTxsOnNodes {
 		if minedNonce > remotePendingNonce {
 			return nil, fmt.Errorf(
@@ -332,10 +489,28 @@ func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) 
 		if localPendingNonce <= minedNonce {
 			// in this case, minedNonce is more up to date, update localPendingNonce
 			// and return minedNonce
+			logger.WithFields(logger.Fields{
+				"request_id":    requestID,
+				"setting_nonce": minedNonce,
+				"return_nonce":  minedNonce,
+				"reason":        "mined_more_recent",
+				"branch":        "no_pending_local<=mined",
+				"goroutine":     getGoroutineID(),
+			}).Info("[NONCE-RACE] Returning nonce (no pending, mined more recent)")
+			
 			wm.setPendingNonce(wallet, network, minedNonce)
 			return big.NewInt(int64(minedNonce)), nil
 		} else {
 			// in this case, local is more up to date, return pending nonce
+			logger.WithFields(logger.Fields{
+				"request_id":    requestID,
+				"setting_nonce": localPendingNonce,
+				"return_nonce":  localPendingNonce,
+				"reason":        "local_more_recent",
+				"branch":        "no_pending_local>mined",
+				"goroutine":     getGoroutineID(),
+			}).Info("[NONCE-RACE] Returning nonce (no pending, local more recent)")
+			
 			wm.setPendingNonce(wallet, network, localPendingNonce) // update local nonce to the latest
 			return big.NewInt(int64(localPendingNonce)), nil
 		}
@@ -348,12 +523,30 @@ func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) 
 		// TODO: put warnings
 		// we don't have to update local pending nonce here since
 		// it will be updated if the new tx is broadcasted with context manager
+		logger.WithFields(logger.Fields{
+			"request_id":    requestID,
+			"setting_nonce": remotePendingNonce,
+			"return_nonce":  remotePendingNonce,
+			"reason":        "pending_from_other_apps",
+			"branch":        "has_pending_local<=mined",
+			"goroutine":     getGoroutineID(),
+		}).Warn("[NONCE-RACE] Returning nonce (pending from other apps)")
+		
 		wm.setPendingNonce(wallet, network, remotePendingNonce) // update local nonce to the latest
 		return big.NewInt(int64(remotePendingNonce)), nil
 	} else if localPendingNonce <= remotePendingNonce {
 		// minedNonce < localPendingNonce <= remotePendingNonce
 		// similar to the previous case, however, there are pending txs came from
 		// jarvis as well. No need special treatments
+		logger.WithFields(logger.Fields{
+			"request_id":    requestID,
+			"setting_nonce": remotePendingNonce,
+			"return_nonce":  remotePendingNonce,
+			"reason":        "pending_including_jarvis",
+			"branch":        "has_pending_local<=remote",
+			"goroutine":     getGoroutineID(),
+		}).Warn("[NONCE-RACE] Returning nonce (pending including jarvis) - POTENTIAL RACE!")
+		
 		wm.setPendingNonce(wallet, network, remotePendingNonce) // update local nonce to the latest
 		return big.NewInt(int64(remotePendingNonce)), nil
 	}
@@ -365,8 +558,31 @@ func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) 
 	// local pending nonce respectively and retry not found txs, need to figure out
 	// a mechanism to stop trying as well.
 	// For now, we will just go ahead with localPendingNonce
+	logger.WithFields(logger.Fields{
+		"request_id":    requestID,
+		"setting_nonce": localPendingNonce,
+		"return_nonce":  localPendingNonce,
+		"reason":        "local_ahead_of_remote",
+		"branch":        "has_pending_local>remote",
+		"goroutine":     getGoroutineID(),
+	}).Warn("[NONCE-RACE] Returning nonce (local ahead of remote) - RACE CONDITION LIKELY!")
+	
 	wm.setPendingNonce(wallet, network, localPendingNonce) // update local nonce to the latest
 	return big.NewInt(int64(localPendingNonce)), nil
+}
+
+// getGoroutineID gets the current goroutine ID for debugging race conditions
+func getGoroutineID() string {
+	buf := make([]byte, 64)
+	n := runtime.Stack(buf, false)
+	buf = buf[:n]
+	// Extract goroutine ID from stack trace
+	for i := 10; i < n; i++ {
+		if buf[i] == ' ' {
+			return string(buf[10:i])
+		}
+	}
+	return "unknown"
 }
 
 func (wm *WalletManager) getGasSettingInfo(network networks.Network) *GasInfo {
@@ -419,6 +635,18 @@ func (wm *WalletManager) BuildTx(
 	data []byte,
 	network networks.Network,
 ) (tx *types.Transaction, err error) {
+	// Generate a unique ID for this BuildTx call
+	buildID := fmt.Sprintf("build-%d-%d", time.Now().UnixNano(), rand.Int31())
+	
+	logger.WithFields(logger.Fields{
+		"build_id":        buildID,
+		"from":           from.Hex(),
+		"to":             to.Hex(),
+		"input_nonce":    nonce,
+		"goroutine":      getGoroutineID(),
+		"timestamp":      time.Now().UnixNano(),
+	}).Debug("[BUILD-RACE] Starting BuildTx")
+	
 	if gasLimit == 0 {
 		gasLimit, err = wm.Reader(network).EstimateExactGas(
 			from.Hex(), to.Hex(),
@@ -427,15 +655,43 @@ func (wm *WalletManager) BuildTx(
 			data,
 		)
 		if err != nil {
+			logger.WithFields(logger.Fields{
+				"build_id": buildID,
+				"error":    err,
+				"goroutine": getGoroutineID(),
+			}).Warn("[BUILD-RACE] Gas estimation failed")
 			return nil, errors.Join(ErrEstimateGasFailed, fmt.Errorf("couldn't estimate gas. The tx is meant to revert or network error. Detail: %w", err))
 		}
 	}
 
 	if nonce == nil {
+		logger.WithFields(logger.Fields{
+			"build_id":  buildID,
+			"from":      from.Hex(),
+			"goroutine": getGoroutineID(),
+		}).Debug("[BUILD-RACE] Nonce is nil, calling wm.nonce()")
+		
 		nonce, err = wm.nonce(from, network)
 		if err != nil {
+			logger.WithFields(logger.Fields{
+				"build_id":  buildID,
+				"error":     err,
+				"goroutine": getGoroutineID(),
+			}).Error("[BUILD-RACE] Failed to acquire nonce")
 			return nil, errors.Join(ErrAcquireNonceFailed, fmt.Errorf("couldn't get nonce of the wallet from any nodes: %w", err))
 		}
+		
+		logger.WithFields(logger.Fields{
+			"build_id":       buildID,
+			"acquired_nonce": nonce.Uint64(),
+			"goroutine":      getGoroutineID(),
+		}).Info("[BUILD-RACE] Successfully acquired nonce")
+	} else {
+		logger.WithFields(logger.Fields{
+			"build_id":       buildID,
+			"provided_nonce": nonce.Uint64(),
+			"goroutine":      getGoroutineID(),
+		}).Debug("[BUILD-RACE] Using provided nonce")
 	}
 
 	if gasPrice == 0 {
@@ -447,7 +703,7 @@ func (wm *WalletManager) BuildTx(
 		tipCapGwei = gasInfo.MaxPriorityPrice
 	}
 
-	return jarviscommon.BuildExactTx(
+	builtTx := jarviscommon.BuildExactTx(
 		txType,
 		nonce.Uint64(),
 		to.Hex(),
@@ -457,7 +713,17 @@ func (wm *WalletManager) BuildTx(
 		tipCapGwei+extraTipCapGwei,
 		data,
 		network.GetChainID(),
-	), nil
+	)
+	
+	logger.WithFields(logger.Fields{
+		"build_id":    buildID,
+		"final_nonce": nonce.Uint64(),
+		"gas_limit":   gasLimit+extraGasLimit,
+		"gas_price":   gasPrice+extraGasPrice,
+		"goroutine":   getGoroutineID(),
+	}).Info("[BUILD-RACE] Transaction built successfully")
+	
+	return builtTx, nil
 }
 
 func (wm *WalletManager) SignTx(
