@@ -499,7 +499,10 @@ func (wm *WalletManager) BroadcastTx(
 	}
 	hash, broadcasted, allErrors := wm.Broadcaster(network).BroadcastTx(tx)
 	if broadcasted {
-		wm.registerBroadcastedTx(tx, network)
+		err := wm.registerBroadcastedTx(tx, network)
+		if err != nil {
+			return "", false, BroadcastError(fmt.Errorf("couldn't register broadcasted tx in context manager: %w", err))
+		}
 	}
 	return hash, broadcasted, NewBroadcastError(allErrors)
 }
@@ -511,7 +514,15 @@ func (wm *WalletManager) BroadcastTxSync(
 	if err != nil {
 		return nil, fmt.Errorf("tx is encoded with unsupported ChainID: %w", err)
 	}
-	return wm.Broadcaster(network).BroadcastTxSync(tx)
+	receipt, err = wm.Broadcaster(network).BroadcastTxSync(tx)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't broadcast sync tx: %w", err)
+	}
+	err = wm.registerBroadcastedTx(tx, network)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't register broadcasted tx in context manager: %w", err)
+	}
+	return receipt, nil
 }
 
 // createErrorDecoder creates an error decoder from ABIs if available
