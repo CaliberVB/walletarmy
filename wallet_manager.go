@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/tranvictor/jarvis/accounts"
 	jarviscommon "github.com/tranvictor/jarvis/common"
 	"github.com/tranvictor/jarvis/networks"
@@ -41,6 +42,8 @@ var (
 	ErrGasPriceLimitReached = fmt.Errorf("gas price protection limit reached")
 	ErrFromAddressZero      = fmt.Errorf("from address cannot be zero")
 	ErrNetworkNil           = fmt.Errorf("network cannot be nil")
+	ErrSimulatedTxReverted  = fmt.Errorf("tx will be reverted")
+	ErrSimulatedTxFailed    = fmt.Errorf("couldn't simulate tx at pending state")
 )
 
 // TxExecutionResult represents the outcome of a transaction execution step
@@ -426,6 +429,7 @@ func (wm *WalletManager) BuildTx(
 			value,
 			data,
 		)
+
 		if err != nil {
 			return nil, errors.Join(ErrEstimateGasFailed, fmt.Errorf("couldn't estimate gas. The tx is meant to revert or network error. Detail: %w", err))
 		}
@@ -445,6 +449,16 @@ func (wm *WalletManager) BuildTx(
 		}
 		gasPrice = gasInfo.GasPrice
 		tipCapGwei = gasInfo.MaxPriorityPrice
+	}
+
+	// simulate the tx at pending state to see if it will be reverted
+	_, err = wm.Reader(network).EthCall(from.Hex(), to.Hex(), data, nil)
+	if err != nil {
+		revertData, isRevert := ethclient.RevertErrorData(err)
+		if isRevert {
+			return nil, errors.Join(ErrSimulatedTxReverted, fmt.Errorf("tx will be reverted: %s. Detail: %w", string(revertData), err))
+		}
+		return nil, errors.Join(ErrSimulatedTxFailed, fmt.Errorf("couldn't simulate tx at pending state. Detail: %w", err))
 	}
 
 	return jarviscommon.BuildExactTx(
