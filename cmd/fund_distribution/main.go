@@ -17,16 +17,26 @@ import (
 
 var L2_GAS_OVERHEAD = big.NewInt(2432225336832 * 10)
 
-type TransferStrategyFunc func(privateKeyConfigs PrivateKeyConfigs, balances map[string]*big.Int) (initialBalances []*big.Int, targetBalances []*big.Int)
+type TransferStrategyFunc func(privateKeyConfigs PrivateKeyConfigs, balances map[string]*big.Int) (initialBalances, targetBalances []*big.Int)
 
-func ExecuteStrategy(network networks.Network, strategy TransferStrategyFunc, privateKeyConfigs PrivateKeyConfigs, balances map[string]*big.Int) (err error) {
+func ExecuteStrategy(
+	network networks.Network,
+	strategy TransferStrategyFunc,
+	privateKeyConfigs PrivateKeyConfigs,
+	balances map[string]*big.Int,
+) (err error) {
 	initialBalances, targetBalances := strategy(privateKeyConfigs, balances)
 
 	transfers := findTransfers(initialBalances, targetBalances)
 
 	fmt.Println("Transfers:")
 	for _, transfer := range transfers {
-		fmt.Printf("Transfer from wallet %s to wallet %s: %s wei\n", privateKeyConfigs[transfer.From].Address, privateKeyConfigs[transfer.To].Address, transfer.Amount.String())
+		fmt.Printf(
+			"Transfer from wallet %s to wallet %s: %s wei\n",
+			privateKeyConfigs[transfer.From].Address,
+			privateKeyConfigs[transfer.To].Address,
+			transfer.Amount.String(),
+		)
 	}
 
 	// command the army to transfer the funds
@@ -94,7 +104,12 @@ func main() {
 
 		fmt.Println("Our walltet army contains the following wallets:")
 		for i, privateKeyConfig := range privateKeyConfigs {
-			fmt.Printf("Address %d: %s. ETH Balance: %s wei\n", i+1, privateKeyConfig.Address, balances[privateKeyConfig.Address].String())
+			fmt.Printf(
+				"Address %d: %s. ETH Balance: %s wei\n",
+				i+1,
+				privateKeyConfig.Address,
+				balances[privateKeyConfig.Address].String(),
+			)
 		}
 		if shouldConsolidate {
 			err = ExecuteStrategy(bitfiL2, CalculateTargetBalancesForConsolidation, privateKeyConfigs, balances)
@@ -109,7 +124,13 @@ func main() {
 	}
 }
 
-func ParallelExecuteTransfers(cm *walletarmy.WalletManager, initialBalances []*big.Int, transfers []Transfer, privateKeyConfigs PrivateKeyConfigs, network networks.Network) error {
+func ParallelExecuteTransfers(
+	cm *walletarmy.WalletManager,
+	initialBalances []*big.Int,
+	transfers []Transfer,
+	privateKeyConfigs PrivateKeyConfigs,
+	network networks.Network,
+) error {
 	wg := sync.WaitGroup{}
 
 	errChan := make(chan error, len(transfers))
@@ -159,7 +180,14 @@ func ParallelExecuteTransfers(cm *walletarmy.WalletManager, initialBalances []*b
 }
 
 // EnsureTransfer ensures that the transfer is executed and the transaction is mined, it is supposed to retry until the transfer is successful
-func EnsureTransfer(cm *walletarmy.WalletManager, fromPrivateKeyConfig PrivateKeyConfig, toPrivateKeyConfig PrivateKeyConfig, initialBalance *big.Int, amount *big.Int, network networks.Network) (err error) {
+func EnsureTransfer(
+	cm *walletarmy.WalletManager,
+	fromPrivateKeyConfig PrivateKeyConfig,
+	toPrivateKeyConfig PrivateKeyConfig,
+	initialBalance *big.Int,
+	amount *big.Int,
+	network networks.Network,
+) (err error) {
 	var tx *types.Transaction
 
 	fromAddress := common.HexToAddress(fromPrivateKeyConfig.Address)
@@ -216,13 +244,22 @@ func EnsureTransfer(cm *walletarmy.WalletManager, fromPrivateKeyConfig PrivateKe
 		return err
 	}
 
-	fmt.Printf("Transfer from %s to %s with amount %s executed successfully with tx %s\n", fromPrivateKeyConfig.Address, toPrivateKeyConfig.Address, amount.String(), tx.Hash().Hex())
+	fmt.Printf(
+		"Transfer from %s to %s with amount %s executed successfully with tx %s\n",
+		fromPrivateKeyConfig.Address,
+		toPrivateKeyConfig.Address,
+		amount.String(),
+		tx.Hash().Hex(),
+	)
 
 	return nil
 }
 
 // CalculateTargetBalancesForConsolidation calculates the target balances to send all of the funds to the first wallet
-func CalculateTargetBalancesForConsolidation(privateKeyConfigs PrivateKeyConfigs, balances map[string]*big.Int) ([]*big.Int, []*big.Int) {
+func CalculateTargetBalancesForConsolidation(
+	privateKeyConfigs PrivateKeyConfigs,
+	balances map[string]*big.Int,
+) ([]*big.Int, []*big.Int) {
 	totalBalance := big.NewInt(0)
 	for _, balance := range balances {
 		totalBalance.Add(totalBalance, balance)
@@ -239,7 +276,10 @@ func CalculateTargetBalancesForConsolidation(privateKeyConfigs PrivateKeyConfigs
 	return initialBalances, targetBalances
 }
 
-func CalculateTargetBalancesForEvenDistribution(privateKeyConfigs PrivateKeyConfigs, balances map[string]*big.Int) ([]*big.Int, []*big.Int) {
+func CalculateTargetBalancesForEvenDistribution(
+	privateKeyConfigs PrivateKeyConfigs,
+	balances map[string]*big.Int,
+) ([]*big.Int, []*big.Int) {
 	totalBalance := big.NewInt(0)
 	for _, balance := range balances {
 		totalBalance.Add(totalBalance, balance)

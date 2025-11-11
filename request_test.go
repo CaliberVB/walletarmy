@@ -18,7 +18,12 @@ func mockHook(tx *types.Transaction, err error) error {
 }
 
 // MockGasEstimationFailedHook for testing gas estimation failed hooks
-func mockGasEstimationFailedHook(tx *types.Transaction, abiError *abi.Error, revertParams any, revertMsgError, gasEstimationError error) (gasLimit *big.Int, err error) {
+func mockGasEstimationFailedHook(
+	tx *types.Transaction,
+	abiError *abi.Error,
+	revertParams any,
+	revertMsgError, gasEstimationError error,
+) (gasLimit *big.Int, err error) {
 	return big.NewInt(21000), nil
 }
 
@@ -181,6 +186,72 @@ func TestTxRequest_SetExtraTipCapGwei(t *testing.T) {
 
 	assert.Equal(t, req, result) // Should return self for chaining
 	assert.Equal(t, 1.5, req.extraTipCapGwei)
+}
+
+func TestTxRequest_SetGasBufferPercent(t *testing.T) {
+	wm := &WalletManager{}
+	req := wm.R()
+
+	t.Run("with valid percentage", func(t *testing.T) {
+		result := req.SetGasBufferPercent(0.40)
+
+		assert.Equal(t, req, result) // Should return self for chaining
+		assert.Equal(t, 0.40, req.gasBufferPercent)
+	})
+
+	t.Run("with zero percentage", func(t *testing.T) {
+		req := wm.R()
+		result := req.SetGasBufferPercent(0)
+
+		assert.Equal(t, req, result)
+		assert.Equal(t, 0.0, req.gasBufferPercent)
+	})
+
+	t.Run("with negative percentage", func(t *testing.T) {
+		req := wm.R()
+		result := req.SetGasBufferPercent(-0.10)
+
+		assert.Equal(t, req, result)
+		assert.Equal(t, -0.10, req.gasBufferPercent)
+	})
+
+	t.Run("with large percentage", func(t *testing.T) {
+		req := wm.R()
+		result := req.SetGasBufferPercent(1.0) // 100% buffer
+
+		assert.Equal(t, req, result)
+		assert.Equal(t, 1.0, req.gasBufferPercent)
+	})
+
+	t.Run("overwriting previous value", func(t *testing.T) {
+		req := wm.R()
+		req.SetGasBufferPercent(0.20)
+		assert.Equal(t, 0.20, req.gasBufferPercent)
+
+		result := req.SetGasBufferPercent(0.50)
+		assert.Equal(t, req, result)
+		assert.Equal(t, 0.50, req.gasBufferPercent)
+	})
+}
+
+func TestTxRequest_GasBufferInBuilderChain(t *testing.T) {
+	wm := &WalletManager{}
+	fromAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	toAddr := common.HexToAddress("0x0987654321098765432109876543210987654321")
+
+	// Test chaining with gas buffer
+	req := wm.R().
+		SetFrom(fromAddr).
+		SetTo(toAddr).
+		SetGasLimit(0).
+		SetGasBufferPercent(0.40).
+		SetExtraGasLimit(5000)
+
+	assert.Equal(t, fromAddr, req.from)
+	assert.Equal(t, toAddr, req.to)
+	assert.Equal(t, uint64(0), req.gasLimit)
+	assert.Equal(t, 0.40, req.gasBufferPercent)
+	assert.Equal(t, uint64(5000), req.extraGasLimit)
 }
 
 func TestTxRequest_SetData(t *testing.T) {
@@ -383,7 +454,7 @@ func TestTxRequest_BuilderPatternChaining(t *testing.T) {
 	duration := 2 * time.Second
 	mockABI := abi.ABI{}
 
-	// Test chaining multiple methods together including new methods
+	// Test chaining multiple methods together including gas buffer
 	req := wm.R().
 		SetNumRetries(3).
 		SetSleepDuration(duration).
@@ -393,6 +464,7 @@ func TestTxRequest_BuilderPatternChaining(t *testing.T) {
 		SetValue(value).
 		SetGasLimit(21000).
 		SetExtraGasLimit(1000).
+		SetGasBufferPercent(0.40).
 		SetGasPrice(20.5).
 		SetExtraGasPrice(5.0).
 		SetTipCapGwei(2.0).
@@ -404,7 +476,7 @@ func TestTxRequest_BuilderPatternChaining(t *testing.T) {
 		SetAbis(mockABI).
 		SetGasEstimationFailedHook(mockGasEstimationFailedHook)
 
-	// Verify all values were set correctly including new fields
+	// Verify all values were set correctly including gas buffer
 	assert.Equal(t, 3, req.numRetries)
 	assert.Equal(t, duration, req.sleepDuration)
 	assert.Equal(t, uint8(2), req.txType)
@@ -413,6 +485,7 @@ func TestTxRequest_BuilderPatternChaining(t *testing.T) {
 	assert.Equal(t, value, req.value)
 	assert.Equal(t, uint64(21000), req.gasLimit)
 	assert.Equal(t, uint64(1000), req.extraGasLimit)
+	assert.Equal(t, 0.40, req.gasBufferPercent)
 	assert.Equal(t, 20.5, req.gasPrice)
 	assert.Equal(t, 5.0, req.extraGasPrice)
 	assert.Equal(t, 2.0, req.tipCapGwei)

@@ -19,19 +19,20 @@ type TxRequest struct {
 	txCheckInterval time.Duration
 
 	// Transaction parameters
-	txType          uint8
-	from, to        common.Address
-	value           *big.Int
-	gasLimit        uint64
-	extraGasLimit   uint64
-	gasPrice        float64
-	extraGasPrice   float64
-	tipCapGwei      float64
-	extraTipCapGwei float64
-	maxGasPrice     float64
-	maxTipCap       float64
-	data            []byte
-	network         networks.Network
+	txType           uint8
+	from, to         common.Address
+	value            *big.Int
+	gasLimit         uint64
+	extraGasLimit    uint64
+	gasBufferPercent float64
+	gasPrice         float64
+	extraGasPrice    float64
+	tipCapGwei       float64
+	extraTipCapGwei  float64
+	maxGasPrice      float64
+	maxTipCap        float64
+	data             []byte
+	network          networks.Network
 
 	// Hooks
 	beforeSignAndBroadcastHook Hook
@@ -102,6 +103,16 @@ func (r *TxRequest) SetGasLimit(gasLimit uint64) *TxRequest {
 // SetExtraGasLimit sets the extra gas limit
 func (r *TxRequest) SetExtraGasLimit(extraGasLimit uint64) *TxRequest {
 	r.extraGasLimit = extraGasLimit
+	return r
+}
+
+// SetGasBufferPercent sets the gas buffer percentage
+// The buffer is applied as a percentage of the estimated/provided gas limit
+// For example, 0.40 means 40% buffer will be added to the gas limit
+// The final gas limit will be: gasLimit + (gasLimit * gasBufferPercent) + extraGasLimit
+// Note: Buffer is only applied when gasBufferPercent > 0; zero or negative values are ignored
+func (r *TxRequest) SetGasBufferPercent(gasBufferPercent float64) *TxRequest {
+	r.gasBufferPercent = gasBufferPercent
 	return r
 }
 
@@ -187,7 +198,7 @@ func (r *TxRequest) Execute() (*types.Transaction, *types.Receipt, error) {
 		r.from,
 		r.to,
 		r.value,
-		r.gasLimit, r.extraGasLimit,
+		r.gasLimit, r.extraGasLimit, r.gasBufferPercent,
 		r.gasPrice, r.extraGasPrice,
 		r.tipCapGwei, r.extraTipCapGwei,
 		r.maxGasPrice, r.maxTipCap,

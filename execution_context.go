@@ -22,13 +22,14 @@ type TxExecutionContext struct {
 	txCheckInterval time.Duration
 
 	// Transaction parameters
-	txType        uint8
-	from, to      common.Address
-	value         *big.Int
-	gasLimit      uint64
-	extraGasLimit uint64
-	data          []byte
-	network       networks.Network
+	txType           uint8
+	from, to         common.Address
+	value            *big.Int
+	gasLimit         uint64
+	extraGasLimit    uint64
+	gasBufferPercent float64
+	data             []byte
+	network          networks.Network
 
 	// Gas pricing (mutable during retries)
 	retryGasPrice   float64
@@ -59,10 +60,10 @@ func NewTxExecutionContext(
 	txType uint8,
 	from, to common.Address,
 	value *big.Int,
-	gasLimit uint64, extraGasLimit uint64,
-	gasPrice float64, extraGasPrice float64,
-	tipCapGwei float64, extraTipCapGwei float64,
-	maxGasPrice float64, maxTipCap float64,
+	gasLimit, extraGasLimit uint64, gasBufferPercent float64,
+	gasPrice, extraGasPrice float64,
+	tipCapGwei, extraTipCapGwei float64,
+	maxGasPrice, maxTipCap float64,
 	data []byte,
 	network networks.Network,
 	beforeSignAndBroadcastHook Hook,
@@ -115,6 +116,7 @@ func NewTxExecutionContext(
 		value:                      value,
 		gasLimit:                   gasLimit,
 		extraGasLimit:              extraGasLimit,
+		gasBufferPercent:           gasBufferPercent,
 		retryGasPrice:              gasPrice,
 		extraGasPrice:              extraGasPrice,
 		retryTipCap:                tipCapGwei,

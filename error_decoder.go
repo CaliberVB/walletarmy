@@ -69,10 +69,20 @@ func (d *ErrorDecoder) Decode(err error) (abiError *abi.Error, errorParams any, 
 	if abiError, exists := d.errorBySelector[errorSelector]; exists {
 		errParams, unpackErr := abiError.Unpack(errorBytes)
 		if unpackErr != nil {
-			return &abiError, nil, fmt.Errorf("failed to unpack error selector %s: %v, original error: %w", abiError.Name, unpackErr, origErr)
+			return &abiError, nil, fmt.Errorf(
+				"failed to unpack error selector %s: %v, original error: %w",
+				abiError.Name,
+				unpackErr,
+				origErr,
+			)
 		}
 
-		return &abiError, errParams, fmt.Errorf("contract error: %s with params: %v, original error: %w", abiError.Name, errParams, origErr)
+		return &abiError, errParams, fmt.Errorf(
+			"contract error: %s with params: %v, original error: %w",
+			abiError.Name,
+			errParams,
+			origErr,
+		)
 	}
 
 	return nil, nil, fmt.Errorf("unknown error: 0x%s, original error: %w", errorSelector, origErr)

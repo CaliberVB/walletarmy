@@ -97,7 +97,7 @@ func TestNewTxExecutionContext_Validation(t *testing.T) {
 	ctx, err := NewTxExecutionContext(
 		-1, 0, 0,
 		0, from, to, nil,
-		0, 0, 0, 0, 0, 0,
+		0, 0, 0.0, 0, 0, 0, 0,
 		0, 0, // maxGasPrice, maxTipCap
 		nil, network,
 		nil, nil, nil, nil,
@@ -127,7 +127,7 @@ func TestNewTxExecutionContext_Validation(t *testing.T) {
 		_, err := NewTxExecutionContext(
 			1, time.Second, time.Second,
 			0, common.Address{}, to, nil,
-			0, 0, 0, 0, 0, 0,
+			0, 0, 0.0, 0, 0, 0, 0,
 			0, 0, // maxGasPrice, maxTipCap
 			nil, network,
 			nil, nil, nil, nil,
@@ -141,7 +141,7 @@ func TestNewTxExecutionContext_Validation(t *testing.T) {
 		_, err := NewTxExecutionContext(
 			1, time.Second, time.Second,
 			0, from, to, nil,
-			0, 0, 0, 0, 0, 0,
+			0, 0, 0.0, 0, 0, 0, 0,
 			0, 0, // maxGasPrice, maxTipCap
 			nil, nil,
 			nil, nil, nil, nil,

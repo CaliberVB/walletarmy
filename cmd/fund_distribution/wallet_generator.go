@@ -10,7 +10,7 @@ import (
 )
 
 // GenerateEthereumKeyPair generates a private key and its associated address in hexadecimal format.
-func GenerateEthereumKeyPair() (privateKeyHex string, addressHex string, err error) {
+func GenerateEthereumKeyPair() (privateKeyHex, addressHex string, err error) {
 	// Generate a new private key
 	privateKey, err := ecdsa.GenerateKey(crypto.S256(), rand.Reader)
 	if err != nil {

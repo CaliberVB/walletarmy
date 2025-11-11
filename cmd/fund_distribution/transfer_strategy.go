@@ -14,7 +14,7 @@ type Transfer struct {
 // findTransfers calculates the transfers needed so that
 // each wallet's balance matches its target balance.
 // Both initial and target should be slices of *big.Int.
-func findTransfers(initial []*big.Int, target []*big.Int) []Transfer {
+func findTransfers(initial, target []*big.Int) []Transfer {
 	n := len(initial)
 	if len(target) != n {
 		panic("initial and target must have the same length")

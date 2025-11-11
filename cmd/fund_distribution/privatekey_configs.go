@@ -69,5 +69,5 @@ func SavePrivateKeyConfigs(path string, privateKeyConfigs PrivateKeyConfigs) err
 		return err
 	}
 	// write the json to the file
-	return os.WriteFile(path, json, 0644)
+	return os.WriteFile(path, json, 0o644)
 }
