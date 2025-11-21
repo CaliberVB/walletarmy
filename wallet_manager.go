@@ -453,14 +453,20 @@ func (wm *WalletManager) BuildTx(
 		tipCapGwei = gasInfo.MaxPriorityPrice
 	}
 
+	gasPriceToUse := gasPrice + extraGasPrice
+	tipCapGweiToUse := tipCapGwei + extraTipCapGwei
+	if tipCapGweiToUse > gasPriceToUse {
+		gasPriceToUse = tipCapGweiToUse
+	}
+
 	return jarviscommon.BuildExactTx(
 		txType,
 		nonce.Uint64(),
 		to.Hex(),
 		value,
 		gasLimit+extraGasLimit,
-		gasPrice+extraGasPrice,
-		tipCapGwei+extraTipCapGwei,
+		gasPriceToUse,
+		tipCapGweiToUse,
 		data,
 		network.GetChainID(),
 	), nil
