@@ -485,8 +485,30 @@ func (wm *WalletManager) setPendingNonceUnlocked(wallet common.Address, network 
 	walletNonces := wm.getOrCreateNonceMap(wallet)
 	oldNonce := walletNonces[network.GetChainID()]
 	if oldNonce != nil && oldNonce.Cmp(big.NewInt(int64(nonce))) >= 0 {
+		logger.WithFields(logger.Fields{
+			"wallet":    wallet.Hex(),
+			"network":   network.GetName(),
+			"chain_id":  network.GetChainID(),
+			"new_nonce": nonce,
+			"old_nonce": oldNonce.Uint64(),
+		}).Debug("setPendingNonce skipped: new nonce not higher than existing")
 		return
 	}
+
+	var oldNonceVal string
+	if oldNonce != nil {
+		oldNonceVal = oldNonce.String()
+	} else {
+		oldNonceVal = "nil"
+	}
+	logger.WithFields(logger.Fields{
+		"wallet":    wallet.Hex(),
+		"network":   network.GetName(),
+		"chain_id":  network.GetChainID(),
+		"new_nonce": nonce,
+		"old_nonce": oldNonceVal,
+	}).Debug("setPendingNonce: updating local pending nonce")
+
 	walletNonces[network.GetChainID()] = big.NewInt(int64(nonce))
 }
 
@@ -555,14 +577,17 @@ func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Ne
 	localPendingNonceBig := wm.getPendingNonceUnlocked(wallet, network)
 
 	var nextNonce uint64
+	var decisionReason string
 
 	if localPendingNonceBig == nil {
 		// First transaction for this wallet/network in this session
 		// Use the max of mined and remote pending nonce
 		if remotePendingNonce > minedNonce {
 			nextNonce = remotePendingNonce
+			decisionReason = "first tx, using remote pending (higher than mined)"
 		} else {
 			nextNonce = minedNonce
+			decisionReason = "first tx, using mined nonce"
 		}
 	} else {
 		localPendingNonce := localPendingNonceBig.Uint64()
@@ -570,6 +595,14 @@ func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Ne
 		hasPendingTxsOnNodes := minedNonce < remotePendingNonce
 		if !hasPendingTxsOnNodes {
 			if minedNonce > remotePendingNonce {
+				logger.WithFields(logger.Fields{
+					"wallet":         wallet.Hex(),
+					"network":        network.GetName(),
+					"chain_id":       network.GetChainID(),
+					"mined_nonce":    minedNonce,
+					"remote_pending": remotePendingNonce,
+					"local_pending":  localPendingNonce,
+				}).Debug("acquireNonce: abnormal state - mined > remote pending")
 				return nil, fmt.Errorf(
 					"mined nonce is higher than pending nonce, this is abnormal data from nodes, retry again later",
 				)
@@ -578,16 +611,20 @@ func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Ne
 			// Use max of local and mined nonce
 			if localPendingNonce > minedNonce {
 				nextNonce = localPendingNonce
+				decisionReason = "no pending on nodes, using local (higher than mined)"
 			} else {
 				nextNonce = minedNonce
+				decisionReason = "no pending on nodes, using mined (>= local)"
 			}
 		} else {
 			// There are pending txs on nodes
 			// Use max of local, remote pending nonce
 			if localPendingNonce > remotePendingNonce {
 				nextNonce = localPendingNonce
+				decisionReason = "pending on nodes, using local (higher than remote)"
 			} else {
 				nextNonce = remotePendingNonce
+				decisionReason = "pending on nodes, using remote (>= local)"
 			}
 		}
 	}
@@ -595,6 +632,24 @@ func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Ne
 	// Reserve this nonce by updating local pending nonce
 	// This ensures the next call to acquireNonce will get nextNonce+1
 	wm.setPendingNonceUnlocked(wallet, network, nextNonce)
+
+	var localNonceStr string
+	if localPendingNonceBig != nil {
+		localNonceStr = localPendingNonceBig.String()
+	} else {
+		localNonceStr = "nil"
+	}
+
+	logger.WithFields(logger.Fields{
+		"wallet":         wallet.Hex(),
+		"network":        network.GetName(),
+		"chain_id":       network.GetChainID(),
+		"acquired_nonce": nextNonce,
+		"mined_nonce":    minedNonce,
+		"remote_pending": remotePendingNonce,
+		"local_pending":  localNonceStr,
+		"decision":       decisionReason,
+	}).Debug("acquireNonce: nonce acquired and reserved")
 
 	return big.NewInt(int64(nextNonce)), nil
 }
@@ -610,6 +665,12 @@ func (wm *WalletManager) ReleaseNonce(wallet common.Address, network networks.Ne
 
 	noncesRaw, ok := wm.pendingNonces.Load(wallet)
 	if !ok {
+		logger.WithFields(logger.Fields{
+			"wallet":   wallet.Hex(),
+			"network":  network.GetName(),
+			"chain_id": network.GetChainID(),
+			"nonce":    nonce,
+		}).Debug("ReleaseNonce: no nonce map found for wallet, nothing to release")
 		return
 	}
 
@@ -621,9 +682,36 @@ func (wm *WalletManager) ReleaseNonce(wallet common.Address, network networks.Ne
 	if currentNonce != nil && currentNonce.Uint64() == nonce {
 		if nonce > 0 {
 			walletNonces[network.GetChainID()] = big.NewInt(int64(nonce - 1))
+			logger.WithFields(logger.Fields{
+				"wallet":         wallet.Hex(),
+				"network":        network.GetName(),
+				"chain_id":       network.GetChainID(),
+				"released_nonce": nonce,
+				"new_stored":     nonce - 1,
+			}).Debug("ReleaseNonce: nonce released successfully")
 		} else {
 			delete(walletNonces, network.GetChainID())
+			logger.WithFields(logger.Fields{
+				"wallet":         wallet.Hex(),
+				"network":        network.GetName(),
+				"chain_id":       network.GetChainID(),
+				"released_nonce": nonce,
+			}).Debug("ReleaseNonce: nonce 0 released, removed network entry")
 		}
+	} else {
+		var currentNonceStr string
+		if currentNonce != nil {
+			currentNonceStr = currentNonce.String()
+		} else {
+			currentNonceStr = "nil"
+		}
+		logger.WithFields(logger.Fields{
+			"wallet":          wallet.Hex(),
+			"network":         network.GetName(),
+			"chain_id":        network.GetChainID(),
+			"requested_nonce": nonce,
+			"current_nonce":   currentNonceStr,
+		}).Debug("ReleaseNonce: skipped - not the tip nonce")
 	}
 }
 
