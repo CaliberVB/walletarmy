@@ -17,8 +17,10 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
-cmd/fund_distribution/private_keys.json
-cmd/fund_distribution/fund_distribution
+# Examples
+examples/fund_distribution/private_keys.json
+examples/fund_distribution/fund_distribution
+examples/*/main
 
 # Go workspace file
 go.work
