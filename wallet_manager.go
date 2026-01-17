@@ -1,6 +1,7 @@
 package walletarmy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -21,6 +22,8 @@ import (
 	"github.com/tranvictor/jarvis/util/broadcaster"
 	"github.com/tranvictor/jarvis/util/monitor"
 	"github.com/tranvictor/jarvis/util/reader"
+
+	"github.com/tranvictor/walletarmy/internal/circuitbreaker"
 )
 
 const (
@@ -44,6 +47,7 @@ var (
 	ErrNetworkNil           = fmt.Errorf("network cannot be nil")
 	ErrSimulatedTxReverted  = fmt.Errorf("tx will be reverted")
 	ErrSimulatedTxFailed    = fmt.Errorf("couldn't simulate tx at pending state")
+	ErrCircuitBreakerOpen   = fmt.Errorf("circuit breaker is open: network temporarily unavailable")
 )
 
 // TxExecutionResult represents the outcome of a transaction execution step
@@ -55,6 +59,27 @@ type TxExecutionResult struct {
 	Error        error
 }
 
+// ManagerDefaults holds default configuration values that are inherited by TxRequest
+type ManagerDefaults struct {
+	// Retry configuration
+	NumRetries      int
+	SleepDuration   time.Duration
+	TxCheckInterval time.Duration
+
+	// Gas configuration
+	ExtraGasLimit   uint64
+	ExtraGasPrice   float64
+	ExtraTipCapGwei float64
+	MaxGasPrice     float64
+	MaxTipCap       float64
+
+	// Default network (if not specified in request)
+	Network networks.Network
+
+	// Default transaction type
+	TxType uint8
+}
+
 // WalletManager manages
 //  1. multiple wallets and their informations in its
 //     life time. It basically gives next nonce to do transaction for specific
@@ -64,44 +89,205 @@ type TxExecutionResult struct {
 //  2. multiple networks gas price. The gas price will be queried lazily prior to txs
 //     and will be stored as cache for a while
 //  3. txs in the context manager's life time
+//  4. circuit breakers for RPC node failover
+//  5. idempotency keys for preventing duplicate transactions
+//  6. default configuration that TxRequest inherits
 type WalletManager struct {
-	lock sync.RWMutex
+	// Lock for defaults access (protects the defaults struct)
+	defaultsMu sync.RWMutex
+
+	// Default configuration inherited by TxRequest
+	defaults ManagerDefaults
+
+	// Network-level locks (keyed by chainID)
+	networkLocks sync.Map // map[uint64]*sync.RWMutex
+
+	// Wallet-level locks (keyed by address)
+	walletLocks sync.Map // map[common.Address]*sync.RWMutex
 
 	// readers stores all reader instances for all networks that ever interacts
 	// with accounts manager. ChainID of the network is used as the key.
-	readers      map[uint64]*reader.EthReader
-	broadcasters map[uint64]*broadcaster.Broadcaster
-	analyzers    map[uint64]*txanalyzer.TxAnalyzer
-	txMonitors   map[uint64]*monitor.TxMonitor
-	accounts     map[common.Address]*account.Account
+	readers      sync.Map // map[uint64]*reader.EthReader
+	broadcasters sync.Map // map[uint64]*broadcaster.Broadcaster
+	analyzers    sync.Map // map[uint64]*txanalyzer.TxAnalyzer
+	txMonitors   sync.Map // map[uint64]*monitor.TxMonitor
+
+	// Circuit breakers for each network (keyed by chainID)
+	circuitBreakers sync.Map // map[uint64]*circuitbreaker.CircuitBreaker
+
+	// accounts keyed by address
+	accounts sync.Map // map[common.Address]*account.Account
 
 	// nonces map between (address, network) => last signed nonce (not mined nonces)
-	pendingNonces map[common.Address]map[uint64]*big.Int
+	// Protected by wallet-level locks
+	pendingNonces sync.Map // map[common.Address]map[uint64]*big.Int
+
 	// txs map between (address, network, nonce) => tx
-	txs map[common.Address]map[uint64]map[uint64]*types.Transaction
+	// Protected by wallet-level locks
+	txs sync.Map // map[common.Address]map[uint64]map[uint64]*types.Transaction
 
 	// gasPrices map between network => gasinfo
-	gasSettings map[uint64]*GasInfo
+	// Protected by network-level locks
+	gasSettings sync.Map // map[uint64]*GasInfo
+
+	// Idempotency store for preventing duplicate transactions
+	idempotencyStore IdempotencyStore
 }
 
-func NewWalletManager() *WalletManager {
-	return &WalletManager{
-		lock:          sync.RWMutex{},
-		readers:       map[uint64]*reader.EthReader{},
-		broadcasters:  map[uint64]*broadcaster.Broadcaster{},
-		analyzers:     map[uint64]*txanalyzer.TxAnalyzer{},
-		txMonitors:    map[uint64]*monitor.TxMonitor{},
-		accounts:      map[common.Address]*account.Account{},
-		pendingNonces: map[common.Address]map[uint64]*big.Int{},
-		txs:           map[common.Address]map[uint64]map[uint64]*types.Transaction{},
-		gasSettings:   map[uint64]*GasInfo{},
+// WalletManagerOption is a function that configures a WalletManager
+type WalletManagerOption func(*WalletManager)
+
+// WithIdempotencyStore sets a custom idempotency store
+func WithIdempotencyStore(store IdempotencyStore) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.idempotencyStore = store
 	}
 }
 
+// WithDefaultIdempotencyStore sets up an in-memory idempotency store with the given TTL
+func WithDefaultIdempotencyStore(ttl time.Duration) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.idempotencyStore = NewInMemoryIdempotencyStore(ttl)
+	}
+}
+
+// WithDefaultNumRetries sets the default number of retries for transactions
+func WithDefaultNumRetries(numRetries int) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.NumRetries = numRetries
+	}
+}
+
+// WithDefaultSleepDuration sets the default sleep duration between retries
+func WithDefaultSleepDuration(duration time.Duration) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.SleepDuration = duration
+	}
+}
+
+// WithDefaultTxCheckInterval sets the default transaction check interval
+func WithDefaultTxCheckInterval(interval time.Duration) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.TxCheckInterval = interval
+	}
+}
+
+// WithDefaultExtraGasLimit sets the default extra gas limit added to estimates
+func WithDefaultExtraGasLimit(extraGasLimit uint64) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.ExtraGasLimit = extraGasLimit
+	}
+}
+
+// WithDefaultExtraGasPrice sets the default extra gas price added to suggestions
+func WithDefaultExtraGasPrice(extraGasPrice float64) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.ExtraGasPrice = extraGasPrice
+	}
+}
+
+// WithDefaultExtraTipCap sets the default extra tip cap added to suggestions
+func WithDefaultExtraTipCap(extraTipCap float64) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.ExtraTipCapGwei = extraTipCap
+	}
+}
+
+// WithDefaultMaxGasPrice sets the default maximum gas price protection limit
+func WithDefaultMaxGasPrice(maxGasPrice float64) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.MaxGasPrice = maxGasPrice
+	}
+}
+
+// WithDefaultMaxTipCap sets the default maximum tip cap protection limit
+func WithDefaultMaxTipCap(maxTipCap float64) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.MaxTipCap = maxTipCap
+	}
+}
+
+// WithDefaultNetwork sets the default network for transactions
+func WithDefaultNetwork(network networks.Network) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.Network = network
+	}
+}
+
+// WithDefaultTxType sets the default transaction type
+func WithDefaultTxType(txType uint8) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults.TxType = txType
+	}
+}
+
+// WithDefaults sets all default configuration at once
+func WithDefaults(defaults ManagerDefaults) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.defaults = defaults
+	}
+}
+
+// Defaults returns the current default configuration
+func (wm *WalletManager) Defaults() ManagerDefaults {
+	wm.defaultsMu.RLock()
+	defer wm.defaultsMu.RUnlock()
+	return wm.defaults
+}
+
+// SetDefaults updates the default configuration
+func (wm *WalletManager) SetDefaults(defaults ManagerDefaults) {
+	wm.defaultsMu.Lock()
+	defer wm.defaultsMu.Unlock()
+	wm.defaults = defaults
+}
+
+// NewWalletManager creates a new WalletManager with optional configuration
+func NewWalletManager(opts ...WalletManagerOption) *WalletManager {
+	wm := &WalletManager{}
+
+	for _, opt := range opts {
+		opt(wm)
+	}
+
+	return wm
+}
+
+// getCircuitBreaker returns the circuit breaker for a network, creating one if necessary
+func (wm *WalletManager) getCircuitBreaker(chainID uint64) *circuitbreaker.CircuitBreaker {
+	cb, _ := wm.circuitBreakers.LoadOrStore(chainID, circuitbreaker.New(circuitbreaker.DefaultConfig()))
+	return cb.(*circuitbreaker.CircuitBreaker)
+}
+
+// GetCircuitBreakerStats returns the circuit breaker statistics for a network
+func (wm *WalletManager) GetCircuitBreakerStats(network networks.Network) circuitbreaker.Stats {
+	return wm.getCircuitBreaker(network.GetChainID()).Stats()
+}
+
+// ResetCircuitBreaker resets the circuit breaker for a network
+func (wm *WalletManager) ResetCircuitBreaker(network networks.Network) {
+	wm.getCircuitBreaker(network.GetChainID()).Reset()
+}
+
+// IdempotencyStore returns the configured idempotency store, or nil if not configured
+func (wm *WalletManager) IdempotencyStore() IdempotencyStore {
+	return wm.idempotencyStore
+}
+
+// getNetworkLock returns the lock for a specific network, creating it if necessary
+func (wm *WalletManager) getNetworkLock(chainID uint64) *sync.RWMutex {
+	lock, _ := wm.networkLocks.LoadOrStore(chainID, &sync.RWMutex{})
+	return lock.(*sync.RWMutex)
+}
+
+// getWalletLock returns the lock for a specific wallet, creating it if necessary
+func (wm *WalletManager) getWalletLock(wallet common.Address) *sync.RWMutex {
+	lock, _ := wm.walletLocks.LoadOrStore(wallet, &sync.RWMutex{})
+	return lock.(*sync.RWMutex)
+}
+
 func (wm *WalletManager) SetAccount(acc *account.Account) {
-	wm.lock.Lock()
-	defer wm.lock.Unlock()
-	wm.accounts[acc.Address()] = acc
+	wm.accounts.Store(acc.Address(), acc)
 }
 
 func (wm *WalletManager) UnlockAccount(addr common.Address) (*account.Account, error) {
@@ -118,152 +304,185 @@ func (wm *WalletManager) UnlockAccount(addr common.Address) (*account.Account, e
 }
 
 func (wm *WalletManager) Account(wallet common.Address) *account.Account {
-	wm.lock.RLock()
-	defer wm.lock.RUnlock()
-	return wm.accounts[wallet]
+	if acc, ok := wm.accounts.Load(wallet); ok {
+		return acc.(*account.Account)
+	}
+	return nil
 }
 
 func (wm *WalletManager) setTx(wallet common.Address, network networks.Network, tx *types.Transaction) {
-	wm.lock.Lock()
-	defer wm.lock.Unlock()
+	lock := wm.getWalletLock(wallet)
+	lock.Lock()
+	defer lock.Unlock()
 
-	if wm.txs[wallet] == nil {
-		wm.txs[wallet] = map[uint64]map[uint64]*types.Transaction{}
+	// Get or create wallet's network map
+	networkMapRaw, _ := wm.txs.LoadOrStore(wallet, make(map[uint64]map[uint64]*types.Transaction))
+	networkMap := networkMapRaw.(map[uint64]map[uint64]*types.Transaction)
+
+	// Get or create network's nonce map
+	if networkMap[network.GetChainID()] == nil {
+		networkMap[network.GetChainID()] = map[uint64]*types.Transaction{}
 	}
 
-	if wm.txs[wallet][network.GetChainID()] == nil {
-		wm.txs[wallet][network.GetChainID()] = map[uint64]*types.Transaction{}
-	}
-
-	wm.txs[wallet][network.GetChainID()][uint64(tx.Nonce())] = tx
+	networkMap[network.GetChainID()][tx.Nonce()] = tx
 }
 
 func (wm *WalletManager) getBroadcaster(network networks.Network) *broadcaster.Broadcaster {
-	wm.lock.RLock()
-	defer wm.lock.RUnlock()
-	return wm.broadcasters[network.GetChainID()]
+	if b, ok := wm.broadcasters.Load(network.GetChainID()); ok {
+		return b.(*broadcaster.Broadcaster)
+	}
+	return nil
 }
 
-func (wm *WalletManager) Broadcaster(network networks.Network) *broadcaster.Broadcaster {
-	broadcaster := wm.getBroadcaster(network)
-	if broadcaster == nil {
+// Broadcaster returns the broadcaster for the given network.
+// Returns an error if the network could not be initialized or if the circuit breaker is open.
+func (wm *WalletManager) Broadcaster(network networks.Network) (*broadcaster.Broadcaster, error) {
+	// Check circuit breaker
+	cb := wm.getCircuitBreaker(network.GetChainID())
+	if !cb.Allow() {
+		return nil, fmt.Errorf("%w for network %s", ErrCircuitBreakerOpen, network)
+	}
+
+	b := wm.getBroadcaster(network)
+	if b == nil {
 		err := wm.initNetwork(network)
 		if err != nil {
-			panic(
-				fmt.Errorf(
-					"couldn't init reader and broadcaster for network: %s, err: %s",
-					network,
-					err,
-				),
-			)
+			cb.RecordFailure()
+			return nil, fmt.Errorf("couldn't init broadcaster for network %s: %w", network, err)
 		}
-		return wm.getBroadcaster(network)
+		b = wm.getBroadcaster(network)
 	}
-	return broadcaster
+	cb.RecordSuccess()
+	return b, nil
 }
 
 func (wm *WalletManager) getReader(network networks.Network) *reader.EthReader {
-	wm.lock.RLock()
-	defer wm.lock.RUnlock()
-	return wm.readers[network.GetChainID()]
+	if r, ok := wm.readers.Load(network.GetChainID()); ok {
+		return r.(*reader.EthReader)
+	}
+	return nil
 }
 
-func (wm *WalletManager) Reader(network networks.Network) *reader.EthReader {
-	reader := wm.getReader(network)
-	if reader == nil {
+// Reader returns the reader for the given network.
+// Returns an error if the network could not be initialized or if the circuit breaker is open.
+func (wm *WalletManager) Reader(network networks.Network) (*reader.EthReader, error) {
+	// Check circuit breaker
+	cb := wm.getCircuitBreaker(network.GetChainID())
+	if !cb.Allow() {
+		return nil, fmt.Errorf("%w for network %s", ErrCircuitBreakerOpen, network)
+	}
+
+	r := wm.getReader(network)
+	if r == nil {
 		err := wm.initNetwork(network)
 		if err != nil {
-			panic(
-				fmt.Errorf(
-					"couldn't init reader and broadcaster for network: %s, err: %s",
-					network,
-					err,
-				),
-			)
+			cb.RecordFailure()
+			return nil, fmt.Errorf("couldn't init reader for network %s: %w", network, err)
 		}
-		return wm.getReader(network)
+		r = wm.getReader(network)
 	}
-	return reader
+	cb.RecordSuccess()
+	return r, nil
+}
+
+// RecordNetworkSuccess records a successful network operation for the circuit breaker
+func (wm *WalletManager) RecordNetworkSuccess(network networks.Network) {
+	wm.getCircuitBreaker(network.GetChainID()).RecordSuccess()
+}
+
+// RecordNetworkFailure records a failed network operation for the circuit breaker
+func (wm *WalletManager) RecordNetworkFailure(network networks.Network) {
+	wm.getCircuitBreaker(network.GetChainID()).RecordFailure()
 }
 
 func (wm *WalletManager) getAnalyzer(network networks.Network) *txanalyzer.TxAnalyzer {
-	wm.lock.RLock()
-	defer wm.lock.RUnlock()
-	return wm.analyzers[network.GetChainID()]
+	if a, ok := wm.analyzers.Load(network.GetChainID()); ok {
+		return a.(*txanalyzer.TxAnalyzer)
+	}
+	return nil
 }
 
 func (wm *WalletManager) getTxMonitor(network networks.Network) *monitor.TxMonitor {
-	wm.lock.RLock()
-	defer wm.lock.RUnlock()
-	return wm.txMonitors[network.GetChainID()]
+	if m, ok := wm.txMonitors.Load(network.GetChainID()); ok {
+		return m.(*monitor.TxMonitor)
+	}
+	return nil
 }
 
-func (wm *WalletManager) Analyzer(network networks.Network) *txanalyzer.TxAnalyzer {
-	analyzer := wm.getAnalyzer(network)
-	if analyzer == nil {
+// Analyzer returns the transaction analyzer for the given network.
+// Returns an error if the network could not be initialized or if the circuit breaker is open.
+func (wm *WalletManager) Analyzer(network networks.Network) (*txanalyzer.TxAnalyzer, error) {
+	// Check circuit breaker
+	cb := wm.getCircuitBreaker(network.GetChainID())
+	if !cb.Allow() {
+		return nil, fmt.Errorf("%w for network %s", ErrCircuitBreakerOpen, network)
+	}
+
+	a := wm.getAnalyzer(network)
+	if a == nil {
 		err := wm.initNetwork(network)
 		if err != nil {
-			panic(
-				fmt.Errorf(
-					"couldn't init reader and broadcaster for network: %s, err: %s",
-					network,
-					err,
-				),
-			)
+			cb.RecordFailure()
+			return nil, fmt.Errorf("couldn't init analyzer for network %s: %w", network, err)
 		}
-		return wm.getAnalyzer(network)
+		a = wm.getAnalyzer(network)
 	}
-	return analyzer
+	cb.RecordSuccess()
+	return a, nil
 }
 
 func (wm *WalletManager) initNetwork(network networks.Network) (err error) {
-	wm.lock.Lock()
-	defer wm.lock.Unlock()
+	chainID := network.GetChainID()
+	lock := wm.getNetworkLock(chainID)
+	lock.Lock()
+	defer lock.Unlock()
 
-	reader, found := wm.readers[network.GetChainID()]
-	if !found {
-		reader, err = util.EthReader(network)
+	// Check if reader exists, create if not
+	var r *reader.EthReader
+	if existing, ok := wm.readers.Load(chainID); ok {
+		r = existing.(*reader.EthReader)
+	} else {
+		r, err = util.EthReader(network)
 		if err != nil {
 			return err
 		}
+		wm.readers.Store(chainID, r)
 	}
-	wm.readers[network.GetChainID()] = reader
 
-	analyzer, found := wm.analyzers[network.GetChainID()]
-	if !found {
-		analyzer = txanalyzer.NewGenericAnalyzer(reader, network)
+	// Check if analyzer exists, create if not
+	if _, ok := wm.analyzers.Load(chainID); !ok {
+		analyzer := txanalyzer.NewGenericAnalyzer(r, network)
+		wm.analyzers.Store(chainID, analyzer)
+	}
+
+	// Check if broadcaster exists, create if not
+	if _, ok := wm.broadcasters.Load(chainID); !ok {
+		b, err := util.EthBroadcaster(network)
 		if err != nil {
 			return err
 		}
+		wm.broadcasters.Store(chainID, b)
 	}
-	wm.analyzers[network.GetChainID()] = analyzer
 
-	broadcaster, found := wm.broadcasters[network.GetChainID()]
-	if !found {
-		broadcaster, err = util.EthBroadcaster(network)
-		if err != nil {
-			return err
-		}
+	// Check if tx monitor exists, create if not
+	if _, ok := wm.txMonitors.Load(chainID); !ok {
+		txMon := monitor.NewGenericTxMonitor(r)
+		wm.txMonitors.Store(chainID, txMon)
 	}
-	wm.broadcasters[network.GetChainID()] = broadcaster
-
-	txMonitor, found := wm.txMonitors[network.GetChainID()]
-	if !found {
-		txMonitor = monitor.NewGenericTxMonitor(reader)
-	}
-	wm.txMonitors[network.GetChainID()] = txMonitor
 
 	return nil
 }
 
-func (wm *WalletManager) setPendingNonce(wallet common.Address, network networks.Network, nonce uint64) {
-	wm.lock.Lock()
-	defer wm.lock.Unlock()
-	walletNonces := wm.pendingNonces[wallet]
-	if walletNonces == nil {
-		walletNonces = map[uint64]*big.Int{}
-		wm.pendingNonces[wallet] = walletNonces
-	}
+// getOrCreateNonceMap returns the nonce map for a wallet, creating it if necessary.
+// MUST be called with wallet lock held.
+func (wm *WalletManager) getOrCreateNonceMap(wallet common.Address) map[uint64]*big.Int {
+	noncesRaw, _ := wm.pendingNonces.LoadOrStore(wallet, make(map[uint64]*big.Int))
+	return noncesRaw.(map[uint64]*big.Int)
+}
+
+// setPendingNonceUnlocked sets the pending nonce. MUST be called with wallet lock held.
+func (wm *WalletManager) setPendingNonceUnlocked(wallet common.Address, network networks.Network, nonce uint64) {
+	walletNonces := wm.getOrCreateNonceMap(wallet)
 	oldNonce := walletNonces[network.GetChainID()]
 	if oldNonce != nil && oldNonce.Cmp(big.NewInt(int64(nonce))) >= 0 {
 		return
@@ -271,13 +490,21 @@ func (wm *WalletManager) setPendingNonce(wallet common.Address, network networks
 	walletNonces[network.GetChainID()] = big.NewInt(int64(nonce))
 }
 
-func (wm *WalletManager) pendingNonce(wallet common.Address, network networks.Network) *big.Int {
-	wm.lock.RLock()
-	defer wm.lock.RUnlock()
-	walletPendingNonces := wm.pendingNonces[wallet]
-	if walletPendingNonces == nil {
+func (wm *WalletManager) setPendingNonce(wallet common.Address, network networks.Network, nonce uint64) {
+	lock := wm.getWalletLock(wallet)
+	lock.Lock()
+	defer lock.Unlock()
+	wm.setPendingNonceUnlocked(wallet, network, nonce)
+}
+
+// getPendingNonceUnlocked returns the next nonce to use. MUST be called with wallet lock held.
+// Returns nil if no local nonce is tracked.
+func (wm *WalletManager) getPendingNonceUnlocked(wallet common.Address, network networks.Network) *big.Int {
+	noncesRaw, ok := wm.pendingNonces.Load(wallet)
+	if !ok {
 		return nil
 	}
+	walletPendingNonces := noncesRaw.(map[uint64]*big.Int)
 	result := walletPendingNonces[network.GetChainID()]
 	if result != nil {
 		// when there is a pending nonce, we add 1 to get the next nonce
@@ -286,113 +513,148 @@ func (wm *WalletManager) pendingNonce(wallet common.Address, network networks.Ne
 	return result
 }
 
-//  1. get remote pending nonce
-//  2. get local pending nonce
-//  2. get mined nonce
-//  3. if mined nonce == remote == local, all good, lets return the mined nonce
-//  4. since mined nonce is always <= remote nonce, if mined nonce > local nonce,
-//     this session doesn't catch up with mined txs (in case there are txs  that
-//     were from other apps and they were mined), return max(mined none, remote nonce)
-//     and set local nonce to max(mined none, remote nonce)
-//  5. if not, means mined nonce is smaller than both remote and local pending nonce
-//     5.1 if remote == local: means all pending txs are from this session, we return
-//     local nonce
-//     5.2 if remote > local: means there is pending txs from another app, we return
-//     remote nonce in order not to mess up with the other txs, but give a warning
-//     5.3 if local > remote: means txs from this session are not broadcasted to the
-//     the notes, return local nonce and give warnings
-func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) (*big.Int, error) {
+func (wm *WalletManager) pendingNonce(wallet common.Address, network networks.Network) *big.Int {
+	lock := wm.getWalletLock(wallet)
+	lock.RLock()
+	defer lock.RUnlock()
+	return wm.getPendingNonceUnlocked(wallet, network)
+}
 
-	reader := wm.Reader(network)
-	minedNonce, err := reader.GetMinedNonce(wallet.Hex())
+// acquireNonce atomically determines and reserves the next nonce for a transaction.
+// This prevents race conditions where multiple concurrent transactions could get the same nonce.
+// The nonce is reserved immediately, so even if the transaction fails, subsequent calls will get
+// a different nonce. Use ReleaseNonce if you need to release an unused nonce.
+//
+// Logic:
+//  1. Get remote pending nonce and mined nonce from the network
+//  2. Compare with local pending nonce to determine the correct next nonce
+//  3. Atomically reserve the nonce by incrementing local pending nonce
+//  4. Return the reserved nonce
+func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Network) (*big.Int, error) {
+	// Get remote nonces first (before acquiring lock to avoid holding lock during network calls)
+	r, err := wm.Reader(network)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't get reader: %w", err)
+	}
 
+	minedNonce, err := r.GetMinedNonce(wallet.Hex())
 	if err != nil {
 		return nil, fmt.Errorf("couldn't get mined nonce in context manager: %s", err)
 	}
 
-	remotePendingNonce, err := reader.GetPendingNonce(wallet.Hex())
-
+	remotePendingNonce, err := r.GetPendingNonce(wallet.Hex())
 	if err != nil {
 		return nil, fmt.Errorf("couldn't get remote pending nonce in context manager: %s", err)
 	}
 
-	var localPendingNonce uint64
-	localPendingNonceBig := wm.pendingNonce(wallet, network)
+	// Now acquire lock and atomically determine + reserve the nonce
+	lock := wm.getWalletLock(wallet)
+	lock.Lock()
+	defer lock.Unlock()
+
+	localPendingNonceBig := wm.getPendingNonceUnlocked(wallet, network)
+
+	var nextNonce uint64
 
 	if localPendingNonceBig == nil {
-		wm.setPendingNonce(wallet, network, remotePendingNonce)
-		localPendingNonce = remotePendingNonce
-	} else {
-		localPendingNonce = localPendingNonceBig.Uint64()
-	}
-
-	hasPendingTxsOnNodes := minedNonce < remotePendingNonce
-	if !hasPendingTxsOnNodes {
-		if minedNonce > remotePendingNonce {
-			return nil, fmt.Errorf(
-				"mined nonce is higher than pending nonce, this is abnormal data from nodes, retry again later",
-			)
-		}
-		// in this case, minedNonce is supposed to == remotePendingNonce
-		if localPendingNonce <= minedNonce {
-			// in this case, minedNonce is more up to date, update localPendingNonce
-			// and return minedNonce
-			wm.setPendingNonce(wallet, network, minedNonce)
-			return big.NewInt(int64(minedNonce)), nil
+		// First transaction for this wallet/network in this session
+		// Use the max of mined and remote pending nonce
+		if remotePendingNonce > minedNonce {
+			nextNonce = remotePendingNonce
 		} else {
-			// in this case, local is more up to date, return pending nonce
-			wm.setPendingNonce(wallet, network, localPendingNonce) // update local nonce to the latest
-			return big.NewInt(int64(localPendingNonce)), nil
+			nextNonce = minedNonce
+		}
+	} else {
+		localPendingNonce := localPendingNonceBig.Uint64()
+
+		hasPendingTxsOnNodes := minedNonce < remotePendingNonce
+		if !hasPendingTxsOnNodes {
+			if minedNonce > remotePendingNonce {
+				return nil, fmt.Errorf(
+					"mined nonce is higher than pending nonce, this is abnormal data from nodes, retry again later",
+				)
+			}
+			// minedNonce == remotePendingNonce (no pending txs on nodes)
+			// Use max of local and mined nonce
+			if localPendingNonce > minedNonce {
+				nextNonce = localPendingNonce
+			} else {
+				nextNonce = minedNonce
+			}
+		} else {
+			// There are pending txs on nodes
+			// Use max of local, remote pending nonce
+			if localPendingNonce > remotePendingNonce {
+				nextNonce = localPendingNonce
+			} else {
+				nextNonce = remotePendingNonce
+			}
 		}
 	}
 
-	if localPendingNonce <= minedNonce {
-		// localPendingNonce <= minedNonce < remotePendingNonce
-		// in this case, there are pending txs on nodes and they are
-		// from other apps
-		// TODO: put warnings
-		// we don't have to update local pending nonce here since
-		// it will be updated if the new tx is broadcasted with context manager
-		wm.setPendingNonce(wallet, network, remotePendingNonce) // update local nonce to the latest
-		return big.NewInt(int64(remotePendingNonce)), nil
-	} else if localPendingNonce <= remotePendingNonce {
-		// minedNonce < localPendingNonce <= remotePendingNonce
-		// similar to the previous case, however, there are pending txs came from
-		// jarvis as well. No need special treatments
-		wm.setPendingNonce(wallet, network, remotePendingNonce) // update local nonce to the latest
-		return big.NewInt(int64(remotePendingNonce)), nil
+	// Reserve this nonce by updating local pending nonce
+	// This ensures the next call to acquireNonce will get nextNonce+1
+	wm.setPendingNonceUnlocked(wallet, network, nextNonce)
+
+	return big.NewInt(int64(nextNonce)), nil
+}
+
+// ReleaseNonce releases a previously acquired nonce that was not used.
+// This allows the nonce to be reused by subsequent transactions.
+// Note: This only affects local tracking. If the transaction was already broadcast
+// to some nodes, calling this may cause issues.
+func (wm *WalletManager) ReleaseNonce(wallet common.Address, network networks.Network, nonce uint64) {
+	lock := wm.getWalletLock(wallet)
+	lock.Lock()
+	defer lock.Unlock()
+
+	noncesRaw, ok := wm.pendingNonces.Load(wallet)
+	if !ok {
+		return
 	}
-	// minedNonce < remotePendingNonce < localPendingNonce
-	// in this case, local has more pending txs, this is the case when
-	// the node doesn't have full pending txs as local, something is
-	// wrong with the local txs.
-	// TODO: give warnings and check pending txs, see if they are not found and update
-	// local pending nonce respectively and retry not found txs, need to figure out
-	// a mechanism to stop trying as well.
-	// For now, we will just go ahead with localPendingNonce
-	wm.setPendingNonce(wallet, network, localPendingNonce) // update local nonce to the latest
-	return big.NewInt(int64(localPendingNonce)), nil
+
+	walletNonces := noncesRaw.(map[uint64]*big.Int)
+	currentNonce := walletNonces[network.GetChainID()]
+
+	// Only release if this is the most recent nonce
+	// (we can only release the "tip" of the nonce sequence)
+	if currentNonce != nil && currentNonce.Uint64() == nonce {
+		if nonce > 0 {
+			walletNonces[network.GetChainID()] = big.NewInt(int64(nonce - 1))
+		} else {
+			delete(walletNonces, network.GetChainID())
+		}
+	}
+}
+
+// nonce is deprecated: use acquireNonce instead for race-safe nonce acquisition.
+// This function is kept for backward compatibility but has race conditions
+// when called concurrently for the same wallet/network.
+func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) (*big.Int, error) {
+	return wm.acquireNonce(wallet, network)
 }
 
 func (wm *WalletManager) getGasSettingInfo(network networks.Network) *GasInfo {
-	wm.lock.RLock()
-	defer wm.lock.RUnlock()
-	return wm.gasSettings[network.GetChainID()]
+	if info, ok := wm.gasSettings.Load(network.GetChainID()); ok {
+		return info.(*GasInfo)
+	}
+	return nil
 }
 
 func (wm *WalletManager) setGasInfo(network networks.Network, info *GasInfo) {
-	wm.lock.Lock()
-	defer wm.lock.Unlock()
-	wm.gasSettings[network.GetChainID()] = info
+	wm.gasSettings.Store(network.GetChainID(), info)
 }
 
-// implement a cache mechanism to be more efficient
+// GasSetting returns cached gas settings for the network, refreshing if stale.
 func (wm *WalletManager) GasSetting(network networks.Network) (*GasInfo, error) {
 	gasInfo := wm.getGasSettingInfo(network)
 	if gasInfo == nil || time.Since(gasInfo.Timestamp) >= GAS_INFO_TTL {
 		// gasInfo is not initiated or outdated
-		reader := wm.Reader(network)
-		gasPrice, gasTipCapGwei, err := reader.SuggestedGasSettings()
+		r, err := wm.Reader(network)
+		if err != nil {
+			return nil, fmt.Errorf("couldn't get reader for gas settings: %w", err)
+		}
+		gasPrice, gasTipCapGwei, err := r.SuggestedGasSettings()
 		if err != nil {
 			return nil, fmt.Errorf("couldn't get gas settings in context manager: %w", err)
 		}
@@ -424,8 +686,23 @@ func (wm *WalletManager) BuildTx(
 	data []byte,
 	network networks.Network,
 ) (tx *types.Transaction, err error) {
+	// Track whether we acquired the nonce (for cleanup on failure)
+	var acquiredNonce bool
+	var nonceValue uint64
+
+	// Cleanup function to release nonce if we fail after acquiring it
+	defer func() {
+		if err != nil && acquiredNonce {
+			wm.ReleaseNonce(from, network, nonceValue)
+		}
+	}()
+
 	if gasLimit == 0 {
-		gasLimit, err = wm.Reader(network).EstimateExactGas(
+		r, readerErr := wm.Reader(network)
+		if readerErr != nil {
+			return nil, errors.Join(ErrEstimateGasFailed, fmt.Errorf("couldn't get reader: %w", readerErr))
+		}
+		gasLimit, err = r.EstimateExactGas(
 			from.Hex(), to.Hex(),
 			gasPrice,
 			value,
@@ -442,12 +719,15 @@ func (wm *WalletManager) BuildTx(
 		if err != nil {
 			return nil, errors.Join(ErrAcquireNonceFailed, fmt.Errorf("couldn't get nonce of the wallet from any nodes: %w", err))
 		}
+		acquiredNonce = true
+		nonceValue = nonce.Uint64()
 	}
 
 	if gasPrice == 0 {
-		gasInfo, err := wm.GasSetting(network)
-		if err != nil {
-			return nil, errors.Join(ErrGetGasSettingFailed, fmt.Errorf("couldn't get gas price info from any nodes: %w", err))
+		gasInfo, gasErr := wm.GasSetting(network)
+		if gasErr != nil {
+			err = errors.Join(ErrGetGasSettingFailed, fmt.Errorf("couldn't get gas price info from any nodes: %w", gasErr))
+			return nil, err
 		}
 		gasPrice = gasInfo.GasPrice
 		tipCapGwei = gasInfo.MaxPriorityPrice
@@ -458,6 +738,9 @@ func (wm *WalletManager) BuildTx(
 	if tipCapGweiToUse > gasPriceToUse {
 		gasPriceToUse = tipCapGweiToUse
 	}
+
+	// Success - clear acquiredNonce so defer doesn't release it
+	acquiredNonce = false
 
 	return jarviscommon.BuildExactTx(
 		txType,
@@ -504,16 +787,20 @@ func (wm *WalletManager) registerBroadcastedTx(tx *types.Transaction, network ne
 func (wm *WalletManager) BroadcastTx(
 	tx *types.Transaction,
 ) (hash string, broadcasted bool, err BroadcastError) {
-	network, err := networks.GetNetworkByID(tx.ChainId().Uint64())
+	network, networkErr := networks.GetNetworkByID(tx.ChainId().Uint64())
 	// TODO: handle chainId 0 for old txs
-	if err != nil {
-		return "", false, BroadcastError(fmt.Errorf("tx is encoded with unsupported ChainID: %w", err))
+	if networkErr != nil {
+		return "", false, BroadcastError(fmt.Errorf("tx is encoded with unsupported ChainID: %w", networkErr))
 	}
-	hash, broadcasted, allErrors := wm.Broadcaster(network).BroadcastTx(tx)
+	b, broadcasterErr := wm.Broadcaster(network)
+	if broadcasterErr != nil {
+		return "", false, BroadcastError(fmt.Errorf("couldn't get broadcaster: %w", broadcasterErr))
+	}
+	hash, broadcasted, allErrors := b.BroadcastTx(tx)
 	if broadcasted {
-		err := wm.registerBroadcastedTx(tx, network)
-		if err != nil {
-			return "", false, BroadcastError(fmt.Errorf("couldn't register broadcasted tx in context manager: %w", err))
+		regErr := wm.registerBroadcastedTx(tx, network)
+		if regErr != nil {
+			return "", false, BroadcastError(fmt.Errorf("couldn't register broadcasted tx in context manager: %w", regErr))
 		}
 	}
 	return hash, broadcasted, NewBroadcastError(allErrors)
@@ -522,11 +809,15 @@ func (wm *WalletManager) BroadcastTx(
 func (wm *WalletManager) BroadcastTxSync(
 	tx *types.Transaction,
 ) (receipt *types.Receipt, err error) {
-	network, err := networks.GetNetworkByID(tx.ChainId().Uint64())
-	if err != nil {
-		return nil, fmt.Errorf("tx is encoded with unsupported ChainID: %w", err)
+	network, networkErr := networks.GetNetworkByID(tx.ChainId().Uint64())
+	if networkErr != nil {
+		return nil, fmt.Errorf("tx is encoded with unsupported ChainID: %w", networkErr)
 	}
-	receipt, err = wm.Broadcaster(network).BroadcastTxSync(tx)
+	b, broadcasterErr := wm.Broadcaster(network)
+	if broadcasterErr != nil {
+		return nil, NewBroadcastError(fmt.Errorf("couldn't get broadcaster: %w", broadcasterErr))
+	}
+	receipt, err = b.BroadcastTxSync(tx)
 	if err != nil {
 		return nil, NewBroadcastError(fmt.Errorf("couldn't broadcast sync tx: %w", err))
 	}
@@ -563,12 +854,26 @@ type TxStatus struct {
 //  1. "mined" if the tx is mined
 //  2. "slow" if the tx is too slow to be mined (so receiver might want to retry with higher gas price)
 //  3. other strings if the tx failed and the reason is returned by the node or other debugging error message that the node can return
+//
+// Deprecated: Use MonitorTxContext instead for better cancellation support.
 func (wm *WalletManager) MonitorTx(tx *types.Transaction, network networks.Network, txCheckInterval time.Duration) <-chan TxStatus {
+	return wm.MonitorTxContext(context.Background(), tx, network, txCheckInterval)
+}
+
+// MonitorTxContext is a context-aware version of MonitorTx that supports cancellation.
+// When the context is cancelled, the monitoring goroutine will exit and close the channel.
+func (wm *WalletManager) MonitorTxContext(ctx context.Context, tx *types.Transaction, network networks.Network, txCheckInterval time.Duration) <-chan TxStatus {
 	txMonitor := wm.getTxMonitor(network)
-	statusChan := make(chan TxStatus)
+	statusChan := make(chan TxStatus, 1) // Buffered to avoid goroutine leak on context cancellation
 	monitorChan := txMonitor.MakeWaitChannelWithInterval(tx.Hash().Hex(), txCheckInterval)
 	go func() {
+		defer close(statusChan)
 		select {
+		case <-ctx.Done():
+			statusChan <- TxStatus{
+				Status:  "cancelled",
+				Receipt: nil,
+			}
 		case status := <-monitorChan:
 			switch status.Status {
 			case "done":
@@ -577,7 +882,6 @@ func (wm *WalletManager) MonitorTx(tx *types.Transaction, network networks.Netwo
 					Receipt: status.Receipt,
 				}
 			case "reverted":
-				// TODO: analyze to see what is the reason
 				statusChan <- TxStatus{
 					Status:  "reverted",
 					Receipt: status.Receipt,
@@ -596,7 +900,6 @@ func (wm *WalletManager) MonitorTx(tx *types.Transaction, network networks.Netwo
 				Receipt: nil,
 			}
 		}
-		close(statusChan)
 	}()
 	return statusChan
 }
@@ -604,37 +907,22 @@ func (wm *WalletManager) MonitorTx(tx *types.Transaction, network networks.Netwo
 func (wm *WalletManager) getTxStatuses(oldTxs map[string]*types.Transaction, network networks.Network) (statuses map[string]jarviscommon.TxInfo, err error) {
 	result := map[string]jarviscommon.TxInfo{}
 
+	r, readerErr := wm.Reader(network)
+	if readerErr != nil {
+		return nil, fmt.Errorf("couldn't get reader for tx statuses: %w", readerErr)
+	}
+
 	for _, tx := range oldTxs {
-		txInfo, _ := wm.Reader(network).TxInfoFromHash(tx.Hash().Hex())
+		txInfo, _ := r.TxInfoFromHash(tx.Hash().Hex())
 		result[tx.Hash().Hex()] = txInfo
 	}
 
 	return result, nil
 }
 
-// EnsureTx ensures the tx is broadcasted and mined, it will retry until the tx is mined
-// it returns nil and error if:
-//  1. the tx couldn't be built
-//  2. the tx couldn't be broadcasted and get mined after 10 retries
-//
-// It always returns the tx that was mined, either if the tx was successful or reverted
-// Possible errors:
-//  1. ErrEstimateGasFailed
-//  2. ErrAcquireNonceFailed
-//  3. ErrGetGasSettingFailed
-//  4. ErrEnsureTxOutOfRetries
-//  5. ErrGasPriceLimitReached
-//
-// # If the caller wants to know the reason of the error, they can use errors.Is to check if the error is one of the above
-//
-// After building the tx and before signing and broadcasting, the caller can provide a function hook to receive the tx and building error,
-// if the hook returns an error, the process will be stopped and the error will be returned. If the hook returns nil, the process will continue
-// even if the tx building failed, in this case, it will retry with the same data up to 10 times and the hook will be called again.
-//
-// After signing and broadcasting successfully, the caller can provide a function hook to receive the signed tx and broadcast error,
-// if the hook returns an error, the process will be stopped and the error will be returned. If the hook returns nil, the process will continue
-// to monitor the tx to see if the tx is mined or not. If the tx is not mined, the process will retry either with a new nonce or with higher gas
-// price and tip cap to ensure the tx is mined. Hooks will be called again in the retry process.
+// EnsureTxWithHooks ensures the tx is broadcasted and mined, it will retry until the tx is mined.
+// This is a convenience wrapper that uses context.Background().
+// For production use, prefer EnsureTxWithHooksContext to allow cancellation.
 func (wm *WalletManager) EnsureTxWithHooks(
 	numRetries int,
 	sleepDuration time.Duration,
@@ -653,8 +941,81 @@ func (wm *WalletManager) EnsureTxWithHooks(
 	abis []abi.ABI,
 	gasEstimationFailedHook GasEstimationFailedHook,
 ) (tx *types.Transaction, receipt *types.Receipt, err error) {
+	return wm.EnsureTxWithHooksContext(
+		context.Background(),
+		numRetries,
+		sleepDuration,
+		txCheckInterval,
+		txType,
+		from,
+		to,
+		value,
+		gasLimit, extraGasLimit,
+		gasPrice, extraGasPrice,
+		tipCapGwei, extraTipCapGwei,
+		maxGasPrice, maxTipCap,
+		data,
+		network,
+		beforeSignAndBroadcastHook,
+		afterSignAndBroadcastHook,
+		abis,
+		gasEstimationFailedHook,
+		nil, // simulationFailedHook
+		nil, // txMinedHook
+	)
+}
+
+// EnsureTxWithHooksContext ensures the tx is broadcasted and mined, it will retry until the tx is mined.
+// The context allows the caller to cancel the operation at any point.
+//
+// It returns nil and error if:
+//  1. the tx couldn't be built
+//  2. the tx couldn't be broadcasted and get mined after numRetries retries
+//  3. the context is cancelled
+//
+// It always returns the tx that was mined, either if the tx was successful or reverted.
+//
+// Possible errors:
+//  1. ErrEstimateGasFailed
+//  2. ErrAcquireNonceFailed
+//  3. ErrGetGasSettingFailed
+//  4. ErrEnsureTxOutOfRetries
+//  5. ErrGasPriceLimitReached
+//  6. context.Canceled or context.DeadlineExceeded
+//
+// # If the caller wants to know the reason of the error, they can use errors.Is to check if the error is one of the above
+//
+// After building the tx and before signing and broadcasting, the caller can provide a function hook to receive the tx and building error,
+// if the hook returns an error, the process will be stopped and the error will be returned. If the hook returns nil, the process will continue
+// even if the tx building failed, in this case, it will retry with the same data up to numRetries times and the hook will be called again.
+//
+// After signing and broadcasting successfully, the caller can provide a function hook to receive the signed tx and broadcast error,
+// if the hook returns an error, the process will be stopped and the error will be returned. If the hook returns nil, the process will continue
+// to monitor the tx to see if the tx is mined or not. If the tx is not mined, the process will retry either with a new nonce or with higher gas
+// price and tip cap to ensure the tx is mined. Hooks will be called again in the retry process.
+func (wm *WalletManager) EnsureTxWithHooksContext(
+	ctx context.Context,
+	numRetries int,
+	sleepDuration time.Duration,
+	txCheckInterval time.Duration,
+	txType uint8,
+	from, to common.Address,
+	value *big.Int,
+	gasLimit uint64, extraGasLimit uint64,
+	gasPrice float64, extraGasPrice float64,
+	tipCapGwei float64, extraTipCapGwei float64,
+	maxGasPrice float64, maxTipCap float64,
+	data []byte,
+	network networks.Network,
+	beforeSignAndBroadcastHook Hook,
+	afterSignAndBroadcastHook Hook,
+	abis []abi.ABI,
+	gasEstimationFailedHook GasEstimationFailedHook,
+	simulationFailedHook SimulationFailedHook,
+	txMinedHook TxMinedHook,
+) (tx *types.Transaction, receipt *types.Receipt, err error) {
 	// Create execution context
-	ctx, err := NewTxExecutionContext(
+	execCtx, err := NewTxExecutionContext(
 		numRetries, sleepDuration, txCheckInterval,
 		txType, from, to, value,
 		gasLimit, extraGasLimit,
@@ -664,26 +1025,52 @@ func (wm *WalletManager) EnsureTxWithHooks(
 		data, network,
 		beforeSignAndBroadcastHook, afterSignAndBroadcastHook,
 		abis, gasEstimationFailedHook,
+		simulationFailedHook, txMinedHook,
 	)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Cleanup function to release nonce if we exit with an error and no tx was broadcast
+	defer func() {
+		if err != nil && len(execCtx.oldTxs) == 0 && execCtx.retryNonce != nil {
+			// We have a reserved nonce but no tx was ever broadcast - release it
+			wm.ReleaseNonce(from, network, execCtx.retryNonce.Uint64())
+		}
+	}()
 
 	// Create error decoder
 	errDecoder := wm.createErrorDecoder(abis)
 
 	// Main execution loop
 	for {
+		// Check for context cancellation before each iteration
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+			return nil, nil, err
+		default:
+		}
+
 		// Only sleep after actual retry attempts, not slow monitoring
-		if ctx.actualRetryCount > 0 {
-			time.Sleep(ctx.sleepDuration)
+		if execCtx.actualRetryCount > 0 {
+			// Use a timer so we can also check for context cancellation during sleep
+			sleepTimer := time.NewTimer(execCtx.sleepDuration)
+			select {
+			case <-ctx.Done():
+				sleepTimer.Stop()
+				err = ctx.Err()
+				return nil, nil, err
+			case <-sleepTimer.C:
+			}
 		}
 
 		// Execute transaction attempt
-		result := wm.executeTransactionAttempt(ctx, errDecoder)
+		result := wm.executeTransactionAttempt(ctx, execCtx, errDecoder)
 
 		if result.ShouldReturn {
-			return result.Transaction, result.Receipt, result.Error
+			err = result.Error
+			return result.Transaction, result.Receipt, err
 		}
 		if result.ShouldRetry {
 			continue
@@ -692,13 +1079,18 @@ func (wm *WalletManager) EnsureTxWithHooks(
 		// Monitor and handle the transaction (only if we have a transaction to monitor)
 		// in this case, result.Receipt can be filled already because of this rpc https://www.quicknode.com/docs/arbitrum/eth_sendRawTransactionSync
 		if result.Transaction != nil && result.Receipt == nil {
-			statusChan := wm.MonitorTx(result.Transaction, ctx.network, ctx.txCheckInterval)
+			statusChan := wm.MonitorTxContext(ctx, result.Transaction, execCtx.network, execCtx.txCheckInterval)
 
+			// Wait for status from the context-aware monitor
 			status := <-statusChan
-
-			result = wm.handleTransactionStatus(status, result.Transaction, ctx)
+			if status.Status == "cancelled" {
+				err = ctx.Err()
+				return nil, nil, err
+			}
+			result = wm.handleTransactionStatus(status, result.Transaction, execCtx)
 			if result.ShouldReturn {
-				return result.Transaction, result.Receipt, result.Error
+				err = result.Error
+				return result.Transaction, result.Receipt, err
 			}
 			if result.ShouldRetry {
 				continue
@@ -708,27 +1100,27 @@ func (wm *WalletManager) EnsureTxWithHooks(
 }
 
 // executeTransactionAttempt handles building and broadcasting a single transaction attempt
-func (wm *WalletManager) executeTransactionAttempt(ctx *TxExecutionContext, errDecoder *ErrorDecoder) *TxExecutionResult {
+func (wm *WalletManager) executeTransactionAttempt(ctx context.Context, execCtx *TxExecutionContext, errDecoder *ErrorDecoder) *TxExecutionResult {
 	// Build transaction
 	builtTx, err := wm.BuildTx(
-		ctx.txType,
-		ctx.from,
-		ctx.to,
-		ctx.retryNonce,
-		ctx.value,
-		ctx.gasLimit,
-		ctx.extraGasLimit,
-		ctx.retryGasPrice,
-		ctx.extraGasPrice,
-		ctx.retryTipCap,
-		ctx.extraTipCapGwei,
-		ctx.data,
-		ctx.network,
+		execCtx.txType,
+		execCtx.from,
+		execCtx.to,
+		execCtx.retryNonce,
+		execCtx.value,
+		execCtx.gasLimit,
+		execCtx.extraGasLimit,
+		execCtx.retryGasPrice,
+		execCtx.extraGasPrice,
+		execCtx.retryTipCap,
+		execCtx.extraTipCapGwei,
+		execCtx.data,
+		execCtx.network,
 	)
 
 	// Handle gas estimation failure
 	if errors.Is(err, ErrEstimateGasFailed) {
-		return wm.handleGasEstimationFailure(ctx, errDecoder, err)
+		return wm.handleGasEstimationFailure(execCtx, errDecoder, err)
 	}
 
 	// If builtTx is nil, skip this iteration
@@ -742,11 +1134,20 @@ func (wm *WalletManager) executeTransactionAttempt(ctx *TxExecutionContext, errD
 	}
 
 	// simulate the tx at pending state to see if it will be reverted
-	_, err = wm.Reader(ctx.network).EthCall(ctx.from.Hex(), ctx.to.Hex(), ctx.data, nil)
+	r, readerErr := wm.Reader(execCtx.network)
+	if readerErr != nil {
+		return &TxExecutionResult{
+			Transaction:  nil,
+			ShouldRetry:  false,
+			ShouldReturn: true,
+			Error:        errors.Join(ErrSimulatedTxFailed, fmt.Errorf("couldn't get reader for simulation: %w", readerErr)),
+		}
+	}
+	_, err = r.EthCall(execCtx.from.Hex(), execCtx.to.Hex(), execCtx.data, nil)
 	if err != nil {
 		revertData, isRevert := ethclient.RevertErrorData(err)
 		if isRevert {
-			return wm.handleEthCallRevertFailure(ctx, errDecoder, builtTx, revertData, err)
+			return wm.handleEthCallRevertFailure(execCtx, errDecoder, builtTx, revertData, err)
 		} else {
 			err = errors.Join(ErrSimulatedTxFailed, fmt.Errorf("couldn't simulate tx at pending state. Detail: %w", err))
 			logger.WithFields(logger.Fields{
@@ -755,7 +1156,7 @@ func (wm *WalletManager) executeTransactionAttempt(ctx *TxExecutionContext, errD
 				"gas_price":       builtTx.GasPrice().String(),
 				"tip_cap":         builtTx.GasTipCap().String(),
 				"max_fee_per_gas": builtTx.GasFeeCap().String(),
-				"used_sync_tx":    ctx.network.IsSyncTxSupported(),
+				"used_sync_tx":    execCtx.network.IsSyncTxSupported(),
 				"error":           err,
 			}).Debug("Tx simulation failed but not a revert error")
 			return &TxExecutionResult{
@@ -768,7 +1169,7 @@ func (wm *WalletManager) executeTransactionAttempt(ctx *TxExecutionContext, errD
 	}
 
 	// Execute hooks and broadcast
-	result := wm.signAndBroadcastTransaction(builtTx, ctx)
+	result := wm.signAndBroadcastTransaction(builtTx, execCtx)
 
 	// If no transaction is set in result, use the built transaction
 	if result.Transaction == nil && !result.ShouldReturn {
@@ -778,10 +1179,13 @@ func (wm *WalletManager) executeTransactionAttempt(ctx *TxExecutionContext, errD
 	return result
 }
 
-func (wm *WalletManager) handleEthCallRevertFailure(ctx *TxExecutionContext, errDecoder *ErrorDecoder, builtTx *types.Transaction, revertData []byte, err error) *TxExecutionResult {
+func (wm *WalletManager) handleEthCallRevertFailure(execCtx *TxExecutionContext, errDecoder *ErrorDecoder, builtTx *types.Transaction, revertData []byte, err error) *TxExecutionResult {
+	var abiError *abi.Error
+	var revertParams any
+
 	if errDecoder != nil {
-		abiError, revertParams, revertMsgErr := errDecoder.Decode(err)
-		err = errors.Join(ErrSimulatedTxReverted, fmt.Errorf("revert error: %s. revert params: %+v, revert msg: %w", abiError.Name, revertParams, revertMsgErr))
+		abiError, revertParams, _ = errDecoder.Decode(err)
+		err = errors.Join(ErrSimulatedTxReverted, fmt.Errorf("revert error: %s. revert params: %+v. Detail: %w", abiError.Name, revertParams, err))
 	} else {
 		err = errors.Join(ErrSimulatedTxReverted, fmt.Errorf("revert data: %s. Detail: %w", common.Bytes2Hex(revertData), err))
 	}
@@ -792,13 +1196,39 @@ func (wm *WalletManager) handleEthCallRevertFailure(ctx *TxExecutionContext, err
 		"gas_price":       builtTx.GasPrice().String(),
 		"tip_cap":         builtTx.GasTipCap().String(),
 		"max_fee_per_gas": builtTx.GasFeeCap().String(),
-		"used_sync_tx":    ctx.network.IsSyncTxSupported(),
+		"used_sync_tx":    execCtx.network.IsSyncTxSupported(),
 		"error":           err,
 		"revert_data":     revertData,
 	}).Debug("Tx simulation showed a revert error")
+
+	// Call simulation failed hook if set
+	if execCtx.simulationFailedHook != nil {
+		shouldRetry, hookErr := execCtx.simulationFailedHook(builtTx, revertData, abiError, revertParams, err)
+		if hookErr != nil {
+			// Release nonce since we're giving up and tx was never broadcast
+			wm.ReleaseNonce(execCtx.from, execCtx.network, builtTx.Nonce())
+			return &TxExecutionResult{
+				Transaction:  nil,
+				ShouldRetry:  false,
+				ShouldReturn: true,
+				Error:        fmt.Errorf("simulation failed hook error: %w", hookErr),
+			}
+		}
+		if !shouldRetry {
+			// Release nonce since we're giving up and tx was never broadcast
+			wm.ReleaseNonce(execCtx.from, execCtx.network, builtTx.Nonce())
+			return &TxExecutionResult{
+				Transaction:  nil,
+				ShouldRetry:  false,
+				ShouldReturn: true,
+				Error:        err,
+			}
+		}
+	}
+
 	// we need to persist a few calculated values here before retrying with the txs
-	ctx.retryNonce = big.NewInt(int64(builtTx.Nonce()))
-	ctx.gasLimit = builtTx.Gas()
+	execCtx.retryNonce = big.NewInt(int64(builtTx.Nonce()))
+	execCtx.gasLimit = builtTx.Gas()
 	// we could persist the error here but then later we need to set it to nil, setting this to the error if the user is supposed to handle such error
 	return &TxExecutionResult{
 		Transaction:  nil,
@@ -809,11 +1239,11 @@ func (wm *WalletManager) handleEthCallRevertFailure(ctx *TxExecutionContext, err
 }
 
 // handleGasEstimationFailure processes gas estimation failures and pending transaction checks
-func (wm *WalletManager) handleGasEstimationFailure(ctx *TxExecutionContext, errDecoder *ErrorDecoder, err error) *TxExecutionResult {
+func (wm *WalletManager) handleGasEstimationFailure(execCtx *TxExecutionContext, errDecoder *ErrorDecoder, err error) *TxExecutionResult {
 	// Only check old transactions if we have any
-	if len(ctx.oldTxs) > 0 {
+	if len(execCtx.oldTxs) > 0 {
 		// Check if previous transactions might have been successful
-		statuses, statusErr := wm.getTxStatuses(ctx.oldTxs, ctx.network)
+		statuses, statusErr := wm.getTxStatuses(execCtx.oldTxs, execCtx.network)
 		if statusErr != nil {
 			logger.WithFields(logger.Fields{
 				"error": statusErr,
@@ -823,7 +1253,7 @@ func (wm *WalletManager) handleGasEstimationFailure(ctx *TxExecutionContext, err
 			// Check for completed transactions
 			for txhash, status := range statuses {
 				if status.Status == "done" || status.Status == "reverted" {
-					if tx, exists := ctx.oldTxs[txhash]; exists && tx != nil {
+					if tx, exists := execCtx.oldTxs[txhash]; exists && tx != nil {
 						return &TxExecutionResult{
 							Transaction:  tx,
 							ShouldRetry:  false,
@@ -839,7 +1269,7 @@ func (wm *WalletManager) handleGasEstimationFailure(ctx *TxExecutionContext, err
 			var bestTx *types.Transaction
 			for txhash, status := range statuses {
 				if status.Status == "pending" {
-					if tx, exists := ctx.oldTxs[txhash]; exists && tx != nil {
+					if tx, exists := execCtx.oldTxs[txhash]; exists && tx != nil {
 						if tx.GasPrice().Cmp(highestGasPrice) > 0 {
 							highestGasPrice = tx.GasPrice()
 							bestTx = tx
@@ -866,9 +1296,9 @@ func (wm *WalletManager) handleGasEstimationFailure(ctx *TxExecutionContext, err
 	}
 
 	// Handle gas estimation failed hook
-	if errDecoder != nil && ctx.gasEstimationFailedHook != nil {
+	if errDecoder != nil && execCtx.gasEstimationFailedHook != nil {
 		abiError, revertParams, revertMsgErr := errDecoder.Decode(err)
-		hookGasLimit, hookErr := ctx.gasEstimationFailedHook(nil, abiError, revertParams, revertMsgErr, err)
+		hookGasLimit, hookErr := execCtx.gasEstimationFailedHook(nil, abiError, revertParams, revertMsgErr, err)
 		if hookErr != nil {
 			return &TxExecutionResult{
 				Transaction:  nil,
@@ -878,18 +1308,18 @@ func (wm *WalletManager) handleGasEstimationFailure(ctx *TxExecutionContext, err
 			}
 		}
 		if hookGasLimit != nil {
-			ctx.gasLimit = hookGasLimit.Uint64()
+			execCtx.gasLimit = hookGasLimit.Uint64()
 		}
 	}
 
 	// Increment retry count for gas estimation failure
-	ctx.actualRetryCount++
-	if ctx.actualRetryCount > ctx.numRetries {
+	execCtx.actualRetryCount++
+	if execCtx.actualRetryCount > execCtx.numRetries {
 		return &TxExecutionResult{
 			Transaction:  nil,
 			ShouldRetry:  false,
 			ShouldReturn: true,
-			Error:        errors.Join(ErrEnsureTxOutOfRetries, fmt.Errorf("gas estimation failed after %d retries", ctx.numRetries)),
+			Error:        errors.Join(ErrEnsureTxOutOfRetries, fmt.Errorf("gas estimation failed after %d retries", execCtx.numRetries)),
 		}
 	}
 
@@ -902,10 +1332,19 @@ func (wm *WalletManager) handleGasEstimationFailure(ctx *TxExecutionContext, err
 }
 
 // signAndBroadcastTransaction handles the signing and broadcasting process
-func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx *TxExecutionContext) *TxExecutionResult {
+func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult {
+	// Helper to release nonce when we fail before broadcast attempt
+	releaseNonce := func() {
+		// Only release if this tx is not in oldTxs (meaning it was never broadcast)
+		if _, exists := execCtx.oldTxs[tx.Hash().Hex()]; !exists {
+			wm.ReleaseNonce(execCtx.from, execCtx.network, tx.Nonce())
+		}
+	}
+
 	// Execute before hook
-	if ctx.beforeSignAndBroadcastHook != nil {
-		if hookError := ctx.beforeSignAndBroadcastHook(tx, nil); hookError != nil {
+	if execCtx.beforeSignAndBroadcastHook != nil {
+		if hookError := execCtx.beforeSignAndBroadcastHook(tx, nil); hookError != nil {
+			releaseNonce()
 			return &TxExecutionResult{
 				Transaction:  nil,
 				ShouldRetry:  false,
@@ -916,8 +1355,9 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 	}
 
 	// Sign transaction
-	signedAddr, signedTx, err := wm.SignTx(ctx.from, tx, ctx.network)
+	signedAddr, signedTx, err := wm.SignTx(execCtx.from, tx, execCtx.network)
 	if err != nil {
+		releaseNonce()
 		return &TxExecutionResult{
 			Transaction:  nil,
 			ShouldRetry:  false,
@@ -927,14 +1367,15 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 	}
 
 	// Verify signed address matches expected address
-	if signedAddr.Cmp(ctx.from) != 0 {
+	if signedAddr.Cmp(execCtx.from) != 0 {
+		releaseNonce()
 		return &TxExecutionResult{
 			Transaction:  nil,
 			ShouldRetry:  false,
 			ShouldReturn: true,
 			Error: fmt.Errorf(
 				"signed from wrong address. You could use wrong hw or passphrase. Expected wallet: %s, signed wallet: %s",
-				ctx.from.Hex(),
+				execCtx.from.Hex(),
 				signedAddr.Hex(),
 			),
 		}
@@ -945,7 +1386,7 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 	var successful bool
 
 	// Broadcast transaction
-	if ctx.network.IsSyncTxSupported() {
+	if execCtx.network.IsSyncTxSupported() {
 		receipt, broadcastErr = wm.BroadcastTxSync(signedTx)
 		if receipt != nil {
 			successful = true
@@ -955,7 +1396,7 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 	}
 
 	if signedTx != nil {
-		ctx.oldTxs[signedTx.Hash().Hex()] = signedTx
+		execCtx.oldTxs[signedTx.Hash().Hex()] = signedTx
 	}
 
 	if !successful {
@@ -967,7 +1408,7 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 				"gas_price":       signedTx.GasPrice().String(),
 				"tip_cap":         signedTx.GasTipCap().String(),
 				"max_fee_per_gas": signedTx.GasFeeCap().String(),
-				"used_sync_tx":    ctx.network.IsSyncTxSupported(),
+				"used_sync_tx":    execCtx.network.IsSyncTxSupported(),
 				"receipt":         receipt,
 				"error":           broadcastErr,
 			}).Debug("Unsuccessful signing and broadcasting transaction")
@@ -975,13 +1416,13 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 			logger.WithFields(logger.Fields{
 				"nonce":        tx.Nonce(),
 				"gas_price":    tx.GasPrice().String(),
-				"used_sync_tx": ctx.network.IsSyncTxSupported(),
+				"used_sync_tx": execCtx.network.IsSyncTxSupported(),
 				"receipt":      receipt,
 				"error":        broadcastErr,
 			}).Debug("Unsuccessful signing and broadcasting transaction (no signed tx)")
 		}
 
-		return wm.handleBroadcastError(broadcastErr, tx, ctx)
+		return wm.handleBroadcastError(broadcastErr, tx, execCtx)
 	}
 
 	// Log successful broadcast
@@ -991,7 +1432,7 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 		"gas_price":       signedTx.GasPrice().String(),
 		"tip_cap":         signedTx.GasTipCap().String(),
 		"max_fee_per_gas": signedTx.GasFeeCap().String(),
-		"used_sync_tx":    ctx.network.IsSyncTxSupported(),
+		"used_sync_tx":    execCtx.network.IsSyncTxSupported(),
 		"receipt":         receipt,
 	}).Info("Signed and broadcasted transaction")
 
@@ -1001,8 +1442,8 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 		hookErr = broadcastErr
 	}
 
-	if ctx.afterSignAndBroadcastHook != nil {
-		if hookError := ctx.afterSignAndBroadcastHook(signedTx, hookErr); hookError != nil {
+	if execCtx.afterSignAndBroadcastHook != nil {
+		if hookError := execCtx.afterSignAndBroadcastHook(signedTx, hookErr); hookError != nil {
 			return &TxExecutionResult{
 				Transaction:  signedTx,
 				Receipt:      receipt,
@@ -1015,6 +1456,18 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 
 	// in case receipt is not nil, it means the tx is broadcasted and mined using eth_sendRawTransactionSync
 	if receipt != nil {
+		// Call txMinedHook if set
+		if execCtx.txMinedHook != nil {
+			if hookErr := execCtx.txMinedHook(signedTx, receipt); hookErr != nil {
+				return &TxExecutionResult{
+					Transaction:  signedTx,
+					Receipt:      receipt,
+					ShouldRetry:  false,
+					ShouldReturn: true,
+					Error:        fmt.Errorf("tx mined hook error: %w", hookErr),
+				}
+			}
+		}
 		return &TxExecutionResult{
 			Transaction:  signedTx,
 			Receipt:      receipt,
@@ -1034,10 +1487,10 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, ctx 
 }
 
 // handleBroadcastError processes various broadcast errors and determines retry strategy
-func (wm *WalletManager) handleBroadcastError(broadcastErr BroadcastError, tx *types.Transaction, ctx *TxExecutionContext) *TxExecutionResult {
+func (wm *WalletManager) handleBroadcastError(broadcastErr BroadcastError, tx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult {
 	// Special case: nonce is low requires checking if transaction is already mined
 	if broadcastErr == ErrNonceIsLow {
-		return wm.handleNonceIsLowError(tx, ctx)
+		return wm.handleNonceIsLowError(tx, execCtx)
 	}
 
 	// Special case: tx is known doesn't count as retry (we're just waiting for it to be mined)
@@ -1045,7 +1498,7 @@ func (wm *WalletManager) handleBroadcastError(broadcastErr BroadcastError, tx *t
 	// however, it should be handled by the slow status gotten from the monitor tx
 	// so we just need to retry with the same nonce
 	if broadcastErr == ErrTxIsKnown {
-		ctx.retryNonce = big.NewInt(int64(tx.Nonce()))
+		execCtx.retryNonce = big.NewInt(int64(tx.Nonce()))
 		return &TxExecutionResult{
 			Transaction:  nil,
 			ShouldRetry:  true,
@@ -1065,12 +1518,12 @@ func (wm *WalletManager) handleBroadcastError(broadcastErr BroadcastError, tx *t
 		errorMsg = fmt.Sprintf("broadcast error: %v", broadcastErr)
 	}
 
-	if result := ctx.incrementRetryCountAndCheck(errorMsg); result != nil {
+	if result := execCtx.incrementRetryCountAndCheck(errorMsg); result != nil {
 		return result
 	}
 
 	// Keep the same nonce for retry
-	ctx.retryNonce = big.NewInt(int64(tx.Nonce()))
+	execCtx.retryNonce = big.NewInt(int64(tx.Nonce()))
 	return &TxExecutionResult{
 		Transaction:  nil,
 		ShouldRetry:  true,
@@ -1080,16 +1533,16 @@ func (wm *WalletManager) handleBroadcastError(broadcastErr BroadcastError, tx *t
 }
 
 // handleNonceIsLowError specifically handles the nonce is low error case
-func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, ctx *TxExecutionContext) *TxExecutionResult {
+func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult {
 
-	statuses, err := wm.getTxStatuses(ctx.oldTxs, ctx.network)
+	statuses, err := wm.getTxStatuses(execCtx.oldTxs, execCtx.network)
 
 	if err != nil {
 		logger.WithFields(logger.Fields{
 			"error": err,
 		}).Debug("Getting tx statuses in case where tx wasn't broadcasted because nonce is too low. Ignore and continue the retry loop")
 
-		if result := ctx.incrementRetryCountAndCheck("nonce is low and status check failed"); result != nil {
+		if result := execCtx.incrementRetryCountAndCheck("nonce is low and status check failed"); result != nil {
 			return result
 		}
 
@@ -1104,7 +1557,7 @@ func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, ctx *TxExe
 	// Check if any old transaction is completed
 	for txhash, status := range statuses {
 		if status.Status == "done" || status.Status == "reverted" {
-			if tx, exists := ctx.oldTxs[txhash]; exists && tx != nil {
+			if tx, exists := execCtx.oldTxs[txhash]; exists && tx != nil {
 				return &TxExecutionResult{
 					Transaction:  tx,
 					ShouldRetry:  false,
@@ -1116,11 +1569,11 @@ func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, ctx *TxExe
 	}
 
 	// No completed transactions found, retry with new nonce
-	if result := ctx.incrementRetryCountAndCheck("nonce is low and no pending transactions"); result != nil {
+	if result := execCtx.incrementRetryCountAndCheck("nonce is low and no pending transactions"); result != nil {
 		return result
 	}
 
-	ctx.retryNonce = nil
+	execCtx.retryNonce = nil
 
 	return &TxExecutionResult{
 		Transaction:  nil,
@@ -1145,9 +1598,21 @@ func (ctx *TxExecutionContext) incrementRetryCountAndCheck(errorMsg string) *TxE
 }
 
 // handleTransactionStatus processes different transaction statuses
-func (wm *WalletManager) handleTransactionStatus(status TxStatus, signedTx *types.Transaction, ctx *TxExecutionContext) *TxExecutionResult {
+func (wm *WalletManager) handleTransactionStatus(status TxStatus, signedTx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult {
 	switch status.Status {
 	case "mined", "reverted":
+		// Call txMinedHook if set
+		if execCtx.txMinedHook != nil {
+			if hookErr := execCtx.txMinedHook(signedTx, status.Receipt); hookErr != nil {
+				return &TxExecutionResult{
+					Transaction:  signedTx,
+					Receipt:      status.Receipt,
+					ShouldRetry:  false,
+					ShouldReturn: true,
+					Error:        fmt.Errorf("tx mined hook error: %w", hookErr),
+				}
+			}
+		}
 		return &TxExecutionResult{
 			Transaction:  signedTx,
 			Receipt:      status.Receipt,
@@ -1161,16 +1626,16 @@ func (wm *WalletManager) handleTransactionStatus(status TxStatus, signedTx *type
 			"tx_hash": signedTx.Hash().Hex(),
 		}).Info("Transaction lost, retrying...")
 
-		ctx.actualRetryCount++
-		if ctx.actualRetryCount > ctx.numRetries {
+		execCtx.actualRetryCount++
+		if execCtx.actualRetryCount > execCtx.numRetries {
 			return &TxExecutionResult{
 				Transaction:  nil,
 				ShouldRetry:  false,
 				ShouldReturn: true,
-				Error:        errors.Join(ErrEnsureTxOutOfRetries, fmt.Errorf("transaction lost after %d retries", ctx.numRetries)),
+				Error:        errors.Join(ErrEnsureTxOutOfRetries, fmt.Errorf("transaction lost after %d retries", execCtx.numRetries)),
 			}
 		}
-		ctx.retryNonce = nil
+		execCtx.retryNonce = nil
 
 		// Sleep will be handled in main loop based on actualRetryCount
 		return &TxExecutionResult{
@@ -1182,7 +1647,7 @@ func (wm *WalletManager) handleTransactionStatus(status TxStatus, signedTx *type
 
 	case "slow":
 		// Try to adjust gas prices for slow transaction
-		if ctx.adjustGasPricesForSlowTx(signedTx) {
+		if execCtx.adjustGasPricesForSlowTx(signedTx) {
 			logger.WithFields(logger.Fields{
 				"tx_hash": signedTx.Hash().Hex(),
 			}).Info(fmt.Sprintf("Transaction slow, continuing to monitor with increased gas price by %.0f%% and tip cap by %.0f%%...",
@@ -1199,15 +1664,15 @@ func (wm *WalletManager) handleTransactionStatus(status TxStatus, signedTx *type
 			// Limits reached - stop retrying and return error
 			logger.WithFields(logger.Fields{
 				"tx_hash":       signedTx.Hash().Hex(),
-				"max_gas_price": ctx.maxGasPrice,
-				"max_tip_cap":   ctx.maxTipCap,
+				"max_gas_price": execCtx.maxGasPrice,
+				"max_tip_cap":   execCtx.maxTipCap,
 			}).Warn("Transaction slow but gas price protection limits reached. Stopping retry attempts.")
 
 			return &TxExecutionResult{
 				Transaction:  signedTx,
 				ShouldRetry:  false,
 				ShouldReturn: true,
-				Error:        errors.Join(ErrGasPriceLimitReached, fmt.Errorf("maxGasPrice: %f, maxTipCap: %f", ctx.maxGasPrice, ctx.maxTipCap)),
+				Error:        errors.Join(ErrGasPriceLimitReached, fmt.Errorf("maxGasPrice: %f, maxTipCap: %f", execCtx.maxGasPrice, execCtx.maxTipCap)),
 			}
 		}
 

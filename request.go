@@ -1,6 +1,7 @@
 package walletarmy
 
 import (
+	"context"
 	"math/big"
 	"time"
 
@@ -37,15 +38,39 @@ type TxRequest struct {
 	beforeSignAndBroadcastHook Hook
 	afterSignAndBroadcastHook  Hook
 	gasEstimationFailedHook    GasEstimationFailedHook
+	simulationFailedHook       SimulationFailedHook
+	txMinedHook                TxMinedHook
 	abis                       []abi.ABI
+
+	// Idempotency key for preventing duplicate transactions
+	idempotencyKey string
 }
 
-// R creates a new transaction request (similar to go-resty's R() method)
+// R creates a new transaction request (similar to go-resty's R() method).
+// The request inherits default configuration from the WalletManager.
 func (wm *WalletManager) R() *TxRequest {
+	// Use Defaults() to safely read with lock
+	defaults := wm.Defaults()
+
+	// Determine default network
+	network := defaults.Network
+	if network == nil {
+		network = networks.EthereumMainnet
+	}
+
 	return &TxRequest{
-		wm:      wm,
-		value:   big.NewInt(0),            // default value
-		network: networks.EthereumMainnet, // default network is Ethereum Mainnet
+		wm:              wm,
+		value:           big.NewInt(0),
+		network:         network,
+		numRetries:      defaults.NumRetries,
+		sleepDuration:   defaults.SleepDuration,
+		txCheckInterval: defaults.TxCheckInterval,
+		txType:          defaults.TxType,
+		extraGasLimit:   defaults.ExtraGasLimit,
+		extraGasPrice:   defaults.ExtraGasPrice,
+		extraTipCapGwei: defaults.ExtraTipCapGwei,
+		maxGasPrice:     defaults.MaxGasPrice,
+		maxTipCap:       defaults.MaxTipCap,
 	}
 }
 
@@ -177,9 +202,116 @@ func (r *TxRequest) SetGasEstimationFailedHook(hook GasEstimationFailedHook) *Tx
 	return r
 }
 
-// Execute executes the transaction request
+// SetSimulationFailedHook sets the hook to be called when eth_call simulation fails.
+// This hook is called when the transaction would revert, allowing the caller to decide
+// whether to retry or handle the error.
+func (r *TxRequest) SetSimulationFailedHook(hook SimulationFailedHook) *TxRequest {
+	r.simulationFailedHook = hook
+	return r
+}
+
+// SetTxMinedHook sets the hook to be called when a transaction is mined.
+// This hook is called for both successful and reverted transactions.
+func (r *TxRequest) SetTxMinedHook(hook TxMinedHook) *TxRequest {
+	r.txMinedHook = hook
+	return r
+}
+
+// SetIdempotencyKey sets a unique key to prevent duplicate transaction submissions.
+// If the same key is used again, the previous transaction result will be returned
+// instead of submitting a new transaction.
+// Requires an IdempotencyStore to be configured on the WalletManager.
+func (r *TxRequest) SetIdempotencyKey(key string) *TxRequest {
+	r.idempotencyKey = key
+	return r
+}
+
+// Execute executes the transaction request using a background context.
+// For production use, prefer ExecuteContext to allow cancellation.
 func (r *TxRequest) Execute() (*types.Transaction, *types.Receipt, error) {
-	return r.wm.EnsureTxWithHooks(
+	return r.ExecuteContext(context.Background())
+}
+
+// ExecuteContext executes the transaction request with context support.
+// The context allows the caller to cancel long-running retry loops.
+func (r *TxRequest) ExecuteContext(ctx context.Context) (*types.Transaction, *types.Receipt, error) {
+	// Validate required fields before starting
+	if r.from == (common.Address{}) {
+		return nil, nil, ErrFromAddressZero
+	}
+	if r.network == nil {
+		return nil, nil, ErrNetworkNil
+	}
+
+	// Handle idempotency if a key is provided and store is configured
+	if r.idempotencyKey != "" && r.wm.idempotencyStore != nil {
+		return r.executeWithIdempotency(ctx)
+	}
+
+	return r.executeInternal(ctx)
+}
+
+// executeWithIdempotency handles idempotent execution
+func (r *TxRequest) executeWithIdempotency(ctx context.Context) (*types.Transaction, *types.Receipt, error) {
+	store := r.wm.idempotencyStore
+
+	// Try to get existing record
+	existing, err := store.Get(r.idempotencyKey)
+	if err == nil {
+		// Record exists - check status
+		switch existing.Status {
+		case IdempotencyStatusConfirmed:
+			// Already completed successfully
+			return existing.Transaction, existing.Receipt, nil
+		case IdempotencyStatusFailed:
+			// Previously failed - return the error
+			return existing.Transaction, existing.Receipt, existing.Error
+		case IdempotencyStatusPending, IdempotencyStatusSubmitted:
+			// Still in progress - return duplicate error
+			return existing.Transaction, existing.Receipt, ErrDuplicateIdempotencyKey
+		}
+	}
+
+	// Create new record
+	record, err := store.Create(r.idempotencyKey)
+	if err == ErrDuplicateIdempotencyKey {
+		// Race condition - another request created the record
+		return record.Transaction, record.Receipt, ErrDuplicateIdempotencyKey
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Execute the transaction
+	tx, receipt, txErr := r.executeInternal(ctx)
+
+	// Update the record with results
+	record.Transaction = tx
+	record.Receipt = receipt
+	record.Error = txErr
+
+	if tx != nil {
+		record.TxHash = tx.Hash()
+	}
+
+	if txErr != nil {
+		record.Status = IdempotencyStatusFailed
+	} else if receipt != nil {
+		record.Status = IdempotencyStatusConfirmed
+	} else {
+		record.Status = IdempotencyStatusSubmitted
+	}
+
+	// Best effort update - don't fail the transaction if update fails
+	_ = store.Update(record)
+
+	return tx, receipt, txErr
+}
+
+// executeInternal performs the actual transaction execution
+func (r *TxRequest) executeInternal(ctx context.Context) (*types.Transaction, *types.Receipt, error) {
+	return r.wm.EnsureTxWithHooksContext(
+		ctx,
 		r.numRetries,
 		r.sleepDuration,
 		r.txCheckInterval,
@@ -197,5 +329,7 @@ func (r *TxRequest) Execute() (*types.Transaction, *types.Receipt, error) {
 		r.afterSignAndBroadcastHook,
 		r.abis,
 		r.gasEstimationFailedHook,
+		r.simulationFailedHook,
+		r.txMinedHook,
 	)
 }

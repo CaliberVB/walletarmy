@@ -48,6 +48,8 @@ type TxExecutionContext struct {
 	beforeSignAndBroadcastHook Hook
 	afterSignAndBroadcastHook  Hook
 	gasEstimationFailedHook    GasEstimationFailedHook
+	simulationFailedHook       SimulationFailedHook
+	txMinedHook                TxMinedHook
 	abis                       []abi.ABI
 }
 
@@ -69,6 +71,8 @@ func NewTxExecutionContext(
 	afterSignAndBroadcastHook Hook,
 	abis []abi.ABI,
 	gasEstimationFailedHook GasEstimationFailedHook,
+	simulationFailedHook SimulationFailedHook,
+	txMinedHook TxMinedHook,
 ) (*TxExecutionContext, error) {
 	// Validate inputs
 	if numRetries < 0 {
@@ -129,6 +133,8 @@ func NewTxExecutionContext(
 		afterSignAndBroadcastHook:  afterSignAndBroadcastHook,
 		abis:                       abis,
 		gasEstimationFailedHook:    gasEstimationFailedHook,
+		simulationFailedHook:       simulationFailedHook,
+		txMinedHook:                txMinedHook,
 	}, nil
 }
 

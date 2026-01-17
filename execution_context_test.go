@@ -101,6 +101,7 @@ func TestNewTxExecutionContext_Validation(t *testing.T) {
 		0, 0, // maxGasPrice, maxTipCap
 		nil, network,
 		nil, nil, nil, nil,
+		nil, nil, // simulationFailedHook, txMinedHook
 	)
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
@@ -131,6 +132,7 @@ func TestNewTxExecutionContext_Validation(t *testing.T) {
 			0, 0, // maxGasPrice, maxTipCap
 			nil, network,
 			nil, nil, nil, nil,
+			nil, nil, // simulationFailedHook, txMinedHook
 		)
 		if err != ErrFromAddressZero {
 			t.Errorf("Expected ErrFromAddressZero, got %v", err)
@@ -145,6 +147,7 @@ func TestNewTxExecutionContext_Validation(t *testing.T) {
 			0, 0, // maxGasPrice, maxTipCap
 			nil, nil,
 			nil, nil, nil, nil,
+			nil, nil, // simulationFailedHook, txMinedHook
 		)
 		if err != ErrNetworkNil {
 			t.Errorf("Expected ErrNetworkNil, got %v", err)
