@@ -186,6 +186,212 @@ tx, receipt, err := wm.R().
     Execute()
 ```
 
+### Creating Custom Networks
+
+You can create custom networks for any EVM-compatible chain. Here's an example for creating a custom Optimism L2 network:
+
+```go
+import (
+    "github.com/ethereum/go-ethereum/common"
+    "github.com/tranvictor/jarvis/networks"
+)
+
+// Create a custom Optimism L2 network
+customNetwork := networks.NewGenericOptimismNetwork(networks.GenericOptimismNetworkConfig{
+    // Name: Primary identifier for the network
+    // Used in logs, UI, and as the main lookup key
+    Name: "rise-testnet",
+
+    // AlternativeNames: Other names that can be used to look up this network
+    // Useful for aliases like "rise", "risetestnet", etc.
+    AlternativeNames: []string{"rise", "riselabs-testnet"},
+
+    // ChainID: The unique chain identifier (EIP-155)
+    // Must match the chain ID returned by the RPC node
+    ChainID: 11155931,
+
+    // NativeTokenSymbol: Symbol of the native gas token
+    // Usually "ETH" for Optimism L2s, but could be custom
+    NativeTokenSymbol: "ETH",
+
+    // NativeTokenDecimal: Decimal places for the native token
+    // Almost always 18 for ETH-based chains
+    NativeTokenDecimal: 18,
+
+    // BlockTime: Average block time in seconds
+    // Used for estimating confirmation times
+    BlockTime: 1,
+
+    // NodeVariableName: Environment variable name for custom RPC URL
+    // If set, the system will check os.Getenv("RISE_TESTNET_NODE") for a custom node URL
+    NodeVariableName: "RISE_TESTNET_NODE",
+
+    // DefaultNodes: Map of node name -> RPC URL
+    // These are the default RPC endpoints if no custom node is configured
+    DefaultNodes: map[string]string{
+        "rise-public": "https://testnet.riselabs.xyz",
+        // You can add multiple nodes for redundancy:
+        // "backup-node": "https://backup.riselabs.xyz",
+    },
+
+    // BlockExplorerAPIKeyVariableName: Environment variable for block explorer API key
+    // Used for fetching ABIs and verifying contracts
+    BlockExplorerAPIKeyVariableName: "RISE_TESTNET_SCAN_API_KEY",
+
+    // BlockExplorerAPIURL: Base URL for the block explorer API (Etherscan-compatible)
+    // Leave empty if no explorer API is available
+    BlockExplorerAPIURL: "",
+
+    // MultiCallContractAddress: Address of the Multicall3 contract
+    // Used for batching multiple read calls into one RPC request
+    // Multicall3 is deployed at the same address on most chains
+    MultiCallContractAddress: common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"),
+
+    // SyncTxSupported: Whether the network supports eth_sendRawTransactionSync
+    // This is an Optimism-specific RPC that returns the receipt immediately
+    // Set to true for Optimism-based L2s that support this feature
+    SyncTxSupported: true,
+})
+
+// Use the custom network in transactions
+tx, receipt, err := wm.R().
+    SetFrom(wallet).
+    SetTo(recipient).
+    SetValue(amount).
+    SetNetwork(customNetwork).
+    Execute()
+```
+
+#### Network Types
+
+The jarvis networks package supports different network types:
+
+```go
+// For standard EVM networks (Ethereum, BSC, Polygon, etc.)
+networks.NewGenericNetwork(networks.GenericNetworkConfig{...})
+
+// For Optimism-based L2s (Optimism, Base, custom OP Stack chains)
+networks.NewGenericOptimismNetwork(networks.GenericOptimismNetworkConfig{...})
+
+// For Arbitrum-based L2s
+networks.NewGenericArbitrumNetwork(networks.GenericArbitrumNetworkConfig{...})
+```
+
+#### Using Environment Variables for RPC URLs
+
+For production, it's recommended to use environment variables for RPC URLs:
+
+```bash
+# Set custom RPC URL
+export RISE_TESTNET_NODE="https://your-private-rpc.com"
+
+# Set block explorer API key (if available)
+export RISE_TESTNET_SCAN_API_KEY="your-api-key"
+```
+
+The network will automatically use the environment variable if set, falling back to DefaultNodes otherwise.
+
+### Synchronous Transaction Mining (eth_sendRawTransactionSync)
+
+Some networks support `eth_sendRawTransactionSync`, a special RPC method that broadcasts a transaction and waits for it to be mined in a single call. This is particularly useful for L2 networks with fast block times.
+
+#### How It Works
+
+```
+Standard Flow (eth_sendRawTransaction):
+1. Build transaction
+2. Sign transaction
+3. Broadcast transaction → returns tx hash immediately
+4. Poll for receipt (multiple RPC calls over time)
+5. Transaction mined → return receipt
+
+Sync Flow (eth_sendRawTransactionSync):
+1. Build transaction
+2. Sign transaction
+3. Broadcast transaction → waits for mining → returns receipt immediately
+   (Single RPC call that blocks until mined)
+```
+
+#### Benefits
+
+- **Faster execution**: No polling loop required
+- **Fewer RPC calls**: Single call instead of broadcast + multiple receipt checks
+- **Simpler flow**: Immediate confirmation in the response
+- **Ideal for L2s**: Fast block times (1-2 seconds) make sync calls practical
+
+#### Supported Networks
+
+Networks that support this feature include:
+- **Optimism** and OP Stack chains (Base, Zora, Mode, Rise, etc.)
+- **Arbitrum** chains
+- Many custom L2 networks
+
+#### Enabling Sync Transactions
+
+When creating a custom network, set `SyncTxSupported: true`:
+
+```go
+customNetwork := networks.NewGenericOptimismNetwork(networks.GenericOptimismNetworkConfig{
+    Name:    "my-l2-network",
+    ChainID: 12345,
+    // ... other config ...
+    
+    // Enable synchronous transaction support
+    SyncTxSupported: true,
+})
+```
+
+#### Automatic Detection
+
+WalletArmy automatically uses sync transactions when available:
+
+```go
+// WalletArmy checks network.IsSyncTxSupported() internally
+// If true, it uses BroadcastTxSync which returns the receipt immediately
+// If false, it uses BroadcastTx and polls for the receipt
+
+tx, receipt, err := wm.R().
+    SetFrom(wallet).
+    SetTo(recipient).
+    SetValue(amount).
+    SetNetwork(optimismNetwork). // Supports sync tx
+    Execute()
+
+// receipt is available immediately after broadcast on sync-supported networks
+// No additional polling was needed
+```
+
+#### Manual Sync Broadcast
+
+You can also use sync broadcast directly:
+
+```go
+// Build and sign transaction
+tx, err := wm.BuildTx(...)
+_, signedTx, err := wm.SignTx(wallet, tx, network)
+
+// Broadcast synchronously - blocks until mined
+receipt, err := wm.BroadcastTxSync(signedTx)
+if err != nil {
+    // Handle error
+}
+
+// Receipt is immediately available
+fmt.Printf("Mined in block: %d\n", receipt.BlockNumber)
+fmt.Printf("Gas used: %d\n", receipt.GasUsed)
+fmt.Printf("Status: %d\n", receipt.Status) // 1 = success, 0 = revert
+```
+
+#### Performance Comparison
+
+| Network Type | Block Time | Sync Support | Typical Confirmation |
+|-------------|-----------|--------------|---------------------|
+| Ethereum Mainnet | ~12s | No | 12-24 seconds |
+| Polygon | ~2s | No | 4-6 seconds |
+| Optimism | ~2s | Yes | 2 seconds (single call) |
+| Arbitrum | ~0.25s | Yes | <1 second (single call) |
+| Base | ~2s | Yes | 2 seconds (single call) |
+
 ### Parallel Multi-Wallet Transactions
 
 Execute transactions from multiple wallets concurrently:
