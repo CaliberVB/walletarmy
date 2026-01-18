@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/tranvictor/jarvis/networks"
+	"github.com/tranvictor/walletarmy/idempotency"
 )
 
 // TxRequest represents a transaction request with builder pattern
@@ -260,23 +261,23 @@ func (r *TxRequest) executeWithIdempotency(ctx context.Context) (*types.Transact
 	if err == nil {
 		// Record exists - check status
 		switch existing.Status {
-		case IdempotencyStatusConfirmed:
+		case idempotency.StatusConfirmed:
 			// Already completed successfully
 			return existing.Transaction, existing.Receipt, nil
-		case IdempotencyStatusFailed:
+		case idempotency.StatusFailed:
 			// Previously failed - return the error
 			return existing.Transaction, existing.Receipt, existing.Error
-		case IdempotencyStatusPending, IdempotencyStatusSubmitted:
+		case idempotency.StatusPending, idempotency.StatusSubmitted:
 			// Still in progress - return duplicate error
-			return existing.Transaction, existing.Receipt, ErrDuplicateIdempotencyKey
+			return existing.Transaction, existing.Receipt, idempotency.ErrDuplicateKey
 		}
 	}
 
 	// Create new record
 	record, err := store.Create(r.idempotencyKey)
-	if err == ErrDuplicateIdempotencyKey {
+	if err == idempotency.ErrDuplicateKey {
 		// Race condition - another request created the record
-		return record.Transaction, record.Receipt, ErrDuplicateIdempotencyKey
+		return record.Transaction, record.Receipt, idempotency.ErrDuplicateKey
 	}
 	if err != nil {
 		return nil, nil, err
@@ -295,11 +296,11 @@ func (r *TxRequest) executeWithIdempotency(ctx context.Context) (*types.Transact
 	}
 
 	if txErr != nil {
-		record.Status = IdempotencyStatusFailed
+		record.Status = idempotency.StatusFailed
 	} else if receipt != nil {
-		record.Status = IdempotencyStatusConfirmed
+		record.Status = idempotency.StatusConfirmed
 	} else {
-		record.Status = IdempotencyStatusSubmitted
+		record.Status = idempotency.StatusSubmitted
 	}
 
 	// Best effort update - don't fail the transaction if update fails

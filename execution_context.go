@@ -1,6 +1,8 @@
 package walletarmy
 
 import (
+	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -173,4 +175,18 @@ func (ctx *TxExecutionContext) adjustGasPricesForSlowTx(tx *types.Transaction) b
 	ctx.retryNonce = big.NewInt(int64(tx.Nonce()))
 
 	return true
+}
+
+// incrementRetryCountAndCheck increments retry count and checks if we've exceeded retries
+func (ctx *TxExecutionContext) incrementRetryCountAndCheck(errorMsg string) *TxExecutionResult {
+	ctx.actualRetryCount++
+	if ctx.actualRetryCount > ctx.numRetries {
+		return &TxExecutionResult{
+			Transaction:  nil,
+			ShouldRetry:  false,
+			ShouldReturn: true,
+			Error:        errors.Join(ErrEnsureTxOutOfRetries, fmt.Errorf("%s after %d retries", errorMsg, ctx.numRetries)),
+		}
+	}
+	return nil
 }

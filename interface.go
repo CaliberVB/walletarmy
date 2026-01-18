@@ -13,6 +13,7 @@ import (
 	"github.com/tranvictor/jarvis/util/account"
 	"github.com/tranvictor/jarvis/util/broadcaster"
 	"github.com/tranvictor/jarvis/util/reader"
+	"github.com/tranvictor/walletarmy/idempotency"
 	"github.com/tranvictor/walletarmy/internal/circuitbreaker"
 )
 
@@ -43,7 +44,7 @@ type Manager interface {
 	RecordNetworkFailure(network networks.Network)
 
 	// Idempotency
-	IdempotencyStore() IdempotencyStore
+	IdempotencyStore() idempotency.Store
 
 	// Default Configuration
 	Defaults() ManagerDefaults

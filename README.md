@@ -744,6 +744,56 @@ if err != nil {
 - **CircuitBreaker**: Protects against cascading RPC failures
 - **IdempotencyStore**: Prevents duplicate transaction submissions
 
+### Project Structure
+
+The codebase is organized for maintainability and reusability:
+
+```
+walletarmy/
+├── manager.go              # Core WalletManager struct, constructors, account management
+├── manager_nonce.go        # Nonce acquisition/release (delegates to internal/nonce)
+├── manager_network.go      # Network infrastructure (reader, broadcaster, analyzer)
+├── manager_tx.go           # Transaction building, signing, broadcasting, EnsureTx
+├── request.go              # TxRequest builder pattern
+├── execution_context.go    # TxExecutionContext for transaction state
+├── interface.go            # Manager interface for mockability
+├── hook.go                 # Hook interfaces (Hook, TxMinedHook, SimulationFailedHook)
+├── errors.go               # Error definitions
+├── types.go                # Core types (TxStatus, TxExecutionResult, ManagerDefaults)
+├── options.go              # WalletManagerOption functional options
+├── broadcast_error.go      # Broadcast error handling and detection
+├── error_decoder.go        # ABI error decoding for contract reverts
+├── gas_info.go             # Gas information types
+├── idempotency/            # Idempotency store subpackage (public)
+│   └── idempotency.go      # Store interface and InMemoryStore implementation
+├── internal/
+│   ├── circuitbreaker/
+│   │   └── circuitbreaker.go   # Circuit breaker implementation
+│   └── nonce/
+│       └── tracker.go          # Thread-safe nonce tracking
+├── examples/
+│   └── fund_distribution/      # Example application
+└── README.md
+```
+
+### File Responsibilities
+
+| File | Responsibility |
+|------|----------------|
+| `manager.go` | WalletManager struct definition, NewWalletManager, account management, defaults access |
+| `manager_nonce.go` | Public nonce API, delegates to internal/nonce tracker |
+| `manager_network.go` | Reader, Broadcaster, Analyzer, initNetwork, GasSetting, circuit breaker access |
+| `manager_tx.go` | BuildTx, SignTx, BroadcastTx, EnsureTx*, MonitorTx, transaction handlers |
+| `request.go` | TxRequest builder with fluent API, Execute/ExecuteContext |
+| `execution_context.go` | TxExecutionContext for managing retry state and gas adjustments |
+| `interface.go` | Manager interface for dependency injection and mocking |
+| `options.go` | Functional options for WalletManager configuration |
+| `errors.go` | All error sentinel values (ErrEstimateGasFailed, etc.) |
+| `types.go` | Core types and constants (TxStatus, ManagerDefaults, etc.) |
+| `idempotency/` | Public subpackage: Store interface and InMemoryStore |
+| `internal/nonce/` | Thread-safe nonce tracking with Tracker struct |
+| `internal/circuitbreaker/` | Circuit breaker pattern for RPC resilience |
+
 ### Concurrency Safety
 
 WalletArmy is designed for concurrent use:
@@ -752,6 +802,7 @@ WalletArmy is designed for concurrent use:
 - **Per-network locks**: Network infrastructure is locked per network
 - **Atomic nonce acquisition**: Nonces are reserved atomically to prevent races
 - **Thread-safe defaults**: Configuration access is protected by RWMutex
+- **sync.Map usage**: Internal maps use sync.Map for lock-free concurrent access
 
 ## Contributing
 
@@ -780,6 +831,33 @@ go build ./...
 - Use `gofmt` for formatting
 - Add comments for exported functions
 - Include debug logging for critical operations
+
+### Testing
+
+```bash
+# Run all tests
+go test ./...
+
+# Run tests with race detection
+go test -race ./...
+
+# Run tests with coverage
+go test -cover ./...
+
+# Run specific package tests
+go test ./internal/circuitbreaker/...
+```
+
+### Internal Packages
+
+The `internal/` directory contains packages that are not part of the public API:
+
+- **circuitbreaker**: A thread-safe circuit breaker implementation for RPC failover protection. Not exported to allow internal refactoring without breaking changes.
+- **nonce**: Thread-safe nonce tracking for multiple wallets across multiple networks. Encapsulates all nonce acquisition, release, and tracking logic.
+
+### Public Subpackages
+
+- **idempotency**: Provides `Store` interface and `InMemoryStore` for preventing duplicate transactions. Import as `github.com/tranvictor/walletarmy/idempotency`.
 
 ### Pull Request Process
 

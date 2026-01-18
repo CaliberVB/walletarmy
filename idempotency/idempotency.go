@@ -1,4 +1,7 @@
-package walletarmy
+// Package idempotency provides an idempotency key store for preventing duplicate
+// transaction submissions. Use this package when you need to ensure that a transaction
+// request is processed only once, even if the client retries.
+package idempotency
 
 import (
 	"fmt"
@@ -9,43 +12,44 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
+// Errors
 var (
-	// ErrDuplicateIdempotencyKey is returned when a transaction with the same key already exists
-	ErrDuplicateIdempotencyKey = fmt.Errorf("duplicate idempotency key: transaction already submitted")
+	// ErrDuplicateKey is returned when a transaction with the same key already exists
+	ErrDuplicateKey = fmt.Errorf("duplicate idempotency key: transaction already submitted")
 
-	// ErrIdempotencyKeyNotFound is returned when looking up a non-existent key
-	ErrIdempotencyKeyNotFound = fmt.Errorf("idempotency key not found")
+	// ErrKeyNotFound is returned when looking up a non-existent key
+	ErrKeyNotFound = fmt.Errorf("idempotency key not found")
 )
 
-// IdempotencyStatus represents the status of an idempotent transaction
-type IdempotencyStatus int
+// Status represents the status of an idempotent transaction
+type Status int
 
 const (
-	IdempotencyStatusPending   IdempotencyStatus = iota // Transaction is being processed
-	IdempotencyStatusSubmitted                          // Transaction has been submitted to the network
-	IdempotencyStatusConfirmed                          // Transaction has been confirmed (mined)
-	IdempotencyStatusFailed                             // Transaction failed permanently
+	StatusPending   Status = iota // Transaction is being processed
+	StatusSubmitted               // Transaction has been submitted to the network
+	StatusConfirmed               // Transaction has been confirmed (mined)
+	StatusFailed                  // Transaction failed permanently
 )
 
-func (s IdempotencyStatus) String() string {
+func (s Status) String() string {
 	switch s {
-	case IdempotencyStatusPending:
+	case StatusPending:
 		return "pending"
-	case IdempotencyStatusSubmitted:
+	case StatusSubmitted:
 		return "submitted"
-	case IdempotencyStatusConfirmed:
+	case StatusConfirmed:
 		return "confirmed"
-	case IdempotencyStatusFailed:
+	case StatusFailed:
 		return "failed"
 	default:
 		return "unknown"
 	}
 }
 
-// IdempotencyRecord stores information about an idempotent transaction
-type IdempotencyRecord struct {
+// Record stores information about an idempotent transaction
+type Record struct {
 	Key         string
-	Status      IdempotencyStatus
+	Status      Status
 	TxHash      common.Hash
 	Transaction *types.Transaction
 	Receipt     *types.Receipt
@@ -54,25 +58,25 @@ type IdempotencyRecord struct {
 	UpdatedAt   time.Time
 }
 
-// IdempotencyStore provides storage for idempotency keys
-type IdempotencyStore interface {
+// Store provides storage for idempotency keys
+type Store interface {
 	// Get retrieves an existing record by key
-	Get(key string) (*IdempotencyRecord, error)
+	Get(key string) (*Record, error)
 
 	// Create creates a new record, returning error if key already exists
-	Create(key string) (*IdempotencyRecord, error)
+	Create(key string) (*Record, error)
 
 	// Update updates an existing record
-	Update(record *IdempotencyRecord) error
+	Update(record *Record) error
 
 	// Delete removes a record by key
 	Delete(key string) error
 }
 
-// InMemoryIdempotencyStore is a simple in-memory implementation of IdempotencyStore
-type InMemoryIdempotencyStore struct {
+// InMemoryStore is a simple in-memory implementation of Store
+type InMemoryStore struct {
 	mu      sync.RWMutex
-	records map[string]*IdempotencyRecord
+	records map[string]*Record
 
 	// TTL for records (0 means no expiration)
 	ttl time.Duration
@@ -83,10 +87,10 @@ type InMemoryIdempotencyStore struct {
 	stopped bool
 }
 
-// NewInMemoryIdempotencyStore creates a new in-memory idempotency store
-func NewInMemoryIdempotencyStore(ttl time.Duration) *InMemoryIdempotencyStore {
-	store := &InMemoryIdempotencyStore{
-		records:  make(map[string]*IdempotencyRecord),
+// NewInMemoryStore creates a new in-memory idempotency store
+func NewInMemoryStore(ttl time.Duration) *InMemoryStore {
+	store := &InMemoryStore{
+		records:  make(map[string]*Record),
 		ttl:      ttl,
 		stopChan: make(chan struct{}),
 	}
@@ -101,7 +105,7 @@ func NewInMemoryIdempotencyStore(ttl time.Duration) *InMemoryIdempotencyStore {
 
 // Stop stops the cleanup goroutine. Should be called when the store is no longer needed
 // to prevent goroutine leaks.
-func (s *InMemoryIdempotencyStore) Stop() {
+func (s *InMemoryStore) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.stopped {
@@ -111,40 +115,40 @@ func (s *InMemoryIdempotencyStore) Stop() {
 }
 
 // Get retrieves an existing record by key
-func (s *InMemoryIdempotencyStore) Get(key string) (*IdempotencyRecord, error) {
+func (s *InMemoryStore) Get(key string) (*Record, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	record, exists := s.records[key]
 	if !exists {
-		return nil, ErrIdempotencyKeyNotFound
+		return nil, ErrKeyNotFound
 	}
 
 	// Check if record has expired
 	if s.ttl > 0 && time.Since(record.CreatedAt) > s.ttl {
-		return nil, ErrIdempotencyKeyNotFound
+		return nil, ErrKeyNotFound
 	}
 
 	return record, nil
 }
 
 // Create creates a new record, returning error if key already exists
-func (s *InMemoryIdempotencyStore) Create(key string) (*IdempotencyRecord, error) {
+func (s *InMemoryStore) Create(key string) (*Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Check if key already exists and is not expired
 	if existing, exists := s.records[key]; exists {
 		if s.ttl == 0 || time.Since(existing.CreatedAt) <= s.ttl {
-			return existing, ErrDuplicateIdempotencyKey
+			return existing, ErrDuplicateKey
 		}
 		// Record expired, allow overwrite
 	}
 
 	now := time.Now()
-	record := &IdempotencyRecord{
+	record := &Record{
 		Key:       key,
-		Status:    IdempotencyStatusPending,
+		Status:    StatusPending,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -154,12 +158,12 @@ func (s *InMemoryIdempotencyStore) Create(key string) (*IdempotencyRecord, error
 }
 
 // Update updates an existing record
-func (s *InMemoryIdempotencyStore) Update(record *IdempotencyRecord) error {
+func (s *InMemoryStore) Update(record *Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, exists := s.records[record.Key]; !exists {
-		return ErrIdempotencyKeyNotFound
+		return ErrKeyNotFound
 	}
 
 	record.UpdatedAt = time.Now()
@@ -168,7 +172,7 @@ func (s *InMemoryIdempotencyStore) Update(record *IdempotencyRecord) error {
 }
 
 // Delete removes a record by key
-func (s *InMemoryIdempotencyStore) Delete(key string) error {
+func (s *InMemoryStore) Delete(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -177,7 +181,7 @@ func (s *InMemoryIdempotencyStore) Delete(key string) error {
 }
 
 // cleanupLoop periodically removes expired records
-func (s *InMemoryIdempotencyStore) cleanupLoop() {
+func (s *InMemoryStore) cleanupLoop() {
 	ticker := time.NewTicker(s.ttl)
 	defer ticker.Stop()
 
@@ -192,7 +196,7 @@ func (s *InMemoryIdempotencyStore) cleanupLoop() {
 }
 
 // cleanup removes expired records
-func (s *InMemoryIdempotencyStore) cleanup() {
+func (s *InMemoryStore) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -205,7 +209,7 @@ func (s *InMemoryIdempotencyStore) cleanup() {
 }
 
 // Size returns the number of records in the store
-func (s *InMemoryIdempotencyStore) Size() int {
+func (s *InMemoryStore) Size() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.records)
