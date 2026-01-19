@@ -1797,3 +1797,394 @@ func TestEnsureTx_GasEstimationFails_RetriesUntilSuccess(t *testing.T) {
 	require.NotNil(t, receipt)
 	assert.GreaterOrEqual(t, estimateCallCount, 3, "gas estimation should have been called at least 3 times")
 }
+
+// ============================================================
+// Additional Nonce Tests for Full Coverage
+// ============================================================
+
+func TestPendingNonce_ReturnsNilForNewWallet(t *testing.T) {
+	setup := newTestSetup(t)
+	wallet := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	nonce := setup.WM.pendingNonce(wallet, networks.EthereumMainnet)
+
+	assert.Nil(t, nonce)
+}
+
+func TestPendingNonce_ReturnsValueAfterSet(t *testing.T) {
+	setup := newTestSetup(t)
+	wallet := testAddr1
+
+	setup.WM.setPendingNonce(wallet, networks.EthereumMainnet, 10)
+
+	nonce := setup.WM.pendingNonce(wallet, networks.EthereumMainnet)
+
+	require.NotNil(t, nonce)
+	assert.Equal(t, uint64(11), nonce.Uint64()) // Returns next nonce (10+1)
+}
+
+func TestAcquireNonce_ReturnsError_WhenReaderFails(t *testing.T) {
+	wm := NewWalletManager(
+		WithReaderFactory(func(network networks.Network) (EthReader, error) {
+			return nil, errors.New("reader init failed")
+		}),
+	)
+
+	nonce, err := wm.acquireNonce(testAddr1, networks.EthereumMainnet)
+
+	assert.Nil(t, nonce)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "couldn't get reader")
+}
+
+func TestAcquireNonce_ReturnsError_WhenMinedNonceFails(t *testing.T) {
+	mockReader := &mockEthReader{
+		GetMinedNonceFn: func(addr string) (uint64, error) {
+			return 0, errors.New("mined nonce error")
+		},
+		GetPendingNonceFn: func(addr string) (uint64, error) {
+			return 0, nil
+		},
+		SuggestedGasSettingsFn: func() (float64, float64, error) {
+			return 20.0, 2.0, nil
+		},
+	}
+
+	wm := NewWalletManager(
+		WithReaderFactory(func(network networks.Network) (EthReader, error) {
+			return mockReader, nil
+		}),
+		WithBroadcasterFactory(func(network networks.Network) (EthBroadcaster, error) {
+			return &mockEthBroadcaster{}, nil
+		}),
+		WithTxMonitorFactory(func(reader EthReader) TxMonitor {
+			return &mockTxMonitor{}
+		}),
+	)
+
+	nonce, err := wm.acquireNonce(testAddr1, networks.EthereumMainnet)
+
+	assert.Nil(t, nonce)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "couldn't get mined nonce")
+}
+
+func TestAcquireNonce_ReturnsError_WhenPendingNonceFails(t *testing.T) {
+	mockReader := &mockEthReader{
+		GetMinedNonceFn: func(addr string) (uint64, error) {
+			return 5, nil
+		},
+		GetPendingNonceFn: func(addr string) (uint64, error) {
+			return 0, errors.New("pending nonce error")
+		},
+		SuggestedGasSettingsFn: func() (float64, float64, error) {
+			return 20.0, 2.0, nil
+		},
+	}
+
+	wm := NewWalletManager(
+		WithReaderFactory(func(network networks.Network) (EthReader, error) {
+			return mockReader, nil
+		}),
+		WithBroadcasterFactory(func(network networks.Network) (EthBroadcaster, error) {
+			return &mockEthBroadcaster{}, nil
+		}),
+		WithTxMonitorFactory(func(reader EthReader) TxMonitor {
+			return &mockTxMonitor{}
+		}),
+	)
+
+	nonce, err := wm.acquireNonce(testAddr1, networks.EthereumMainnet)
+
+	assert.Nil(t, nonce)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "couldn't get remote pending nonce")
+}
+
+func TestHandleNonceIsLowError_TxStatusCheckFails_RetriesOrExceeds(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Make status check fail
+	setup.Reader.TxInfoFromHashFn = func(hash string) (TxInfo, error) {
+		return TxInfo{}, errors.New("status check failed")
+	}
+
+	oldTx := newTestTx(5, testAddr2, oneEth)
+	newTx := newTestTx(6, testAddr2, oneEth)
+
+	t.Run("retries when under limit", func(t *testing.T) {
+		execCtx := &TxExecutionContext{
+			NumRetries: 5,
+			OldTxs: map[string]*types.Transaction{
+				oldTx.Hash().Hex(): oldTx,
+			},
+			Network: networks.EthereumMainnet,
+		}
+
+		result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+		assert.True(t, result.ShouldRetry)
+		assert.False(t, result.ShouldReturn)
+		assert.Nil(t, result.Error)
+	})
+
+	t.Run("exceeds retries", func(t *testing.T) {
+		execCtx := &TxExecutionContext{
+			NumRetries:       3,
+			ActualRetryCount: 3, // Already at max
+			OldTxs: map[string]*types.Transaction{
+				oldTx.Hash().Hex(): oldTx,
+			},
+			Network: networks.EthereumMainnet,
+		}
+
+		result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+		// Should return with error after exceeding retries
+		assert.False(t, result.ShouldRetry)
+		assert.True(t, result.ShouldReturn)
+		assert.Error(t, result.Error)
+	})
+}
+
+func TestHandleNonceIsLowError_NoPendingTxs_Retries(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Return "pending" for all txs (no completed ones)
+	setup.Reader.TxInfoFromHashFn = func(hash string) (TxInfo, error) {
+		return TxInfo{Status: "pending"}, nil
+	}
+
+	oldTx := newTestTx(5, testAddr2, oneEth)
+	newTx := newTestTx(6, testAddr2, oneEth)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		OldTxs: map[string]*types.Transaction{
+			oldTx.Hash().Hex(): oldTx,
+		},
+		Network: networks.EthereumMainnet,
+	}
+
+	result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+	// Should retry with new nonce (RetryNonce = nil)
+	assert.True(t, result.ShouldRetry)
+	assert.False(t, result.ShouldReturn)
+	assert.Nil(t, execCtx.RetryNonce)
+}
+
+func TestHandleNonceIsLowError_RevertedTxFound_Returns(t *testing.T) {
+	setup := newTestSetup(t)
+
+	oldTx := newTestTx(5, testAddr2, oneEth)
+	revertedReceipt := newFailedReceipt(oldTx)
+
+	setup.Reader.TxInfoFromHashFn = func(hash string) (TxInfo, error) {
+		if hash == oldTx.Hash().Hex() {
+			return TxInfo{Status: "reverted", Receipt: revertedReceipt}, nil
+		}
+		return TxInfo{Status: "pending"}, nil
+	}
+
+	newTx := newTestTx(6, testAddr2, oneEth)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		OldTxs: map[string]*types.Transaction{
+			oldTx.Hash().Hex(): oldTx,
+		},
+		Network: networks.EthereumMainnet,
+	}
+
+	result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+	// Should return the reverted tx
+	assert.True(t, result.ShouldReturn)
+	assert.False(t, result.ShouldRetry)
+	assert.Equal(t, oldTx, result.Transaction)
+}
+
+func TestHandleNonceIsLowError_NoOldTxs_Retries(t *testing.T) {
+	setup := newTestSetup(t)
+
+	newTx := newTestTx(6, testAddr2, oneEth)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		OldTxs:     make(map[string]*types.Transaction), // Empty
+		Network:    networks.EthereumMainnet,
+	}
+
+	result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+	// Should retry
+	assert.True(t, result.ShouldRetry)
+	assert.False(t, result.ShouldReturn)
+}
+
+func TestHandleNonceIsLowError_ExceedsRetries_NoPendingTxs(t *testing.T) {
+	setup := newTestSetup(t)
+
+	setup.Reader.TxInfoFromHashFn = func(hash string) (TxInfo, error) {
+		return TxInfo{Status: "pending"}, nil
+	}
+
+	oldTx := newTestTx(5, testAddr2, oneEth)
+	newTx := newTestTx(6, testAddr2, oneEth)
+
+	execCtx := &TxExecutionContext{
+		NumRetries:       2,
+		ActualRetryCount: 2, // At max
+		OldTxs: map[string]*types.Transaction{
+			oldTx.Hash().Hex(): oldTx,
+		},
+		Network: networks.EthereumMainnet,
+	}
+
+	result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+	assert.False(t, result.ShouldRetry)
+	assert.True(t, result.ShouldReturn)
+	assert.Error(t, result.Error)
+}
+
+func TestNonce_IsAliasForAcquireNonce(t *testing.T) {
+	setup := newTestSetup(t)
+	setup.Reader.GetMinedNonceFn = func(addr string) (uint64, error) { return 5, nil }
+	setup.Reader.GetPendingNonceFn = func(addr string) (uint64, error) { return 5, nil }
+
+	nonce, err := setup.WM.nonce(testAddr1, networks.EthereumMainnet)
+
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5), nonce.Uint64())
+}
+
+func TestSetPendingNonce_UpdatesTracker(t *testing.T) {
+	setup := newTestSetup(t)
+	wallet := testAddr1
+	network := networks.EthereumMainnet
+
+	// Initially nil
+	initialNonce := setup.WM.pendingNonce(wallet, network)
+	assert.Nil(t, initialNonce)
+
+	// Set nonce
+	setup.WM.setPendingNonce(wallet, network, 100)
+
+	// Should return 101 (next nonce)
+	updatedNonce := setup.WM.pendingNonce(wallet, network)
+	require.NotNil(t, updatedNonce)
+	assert.Equal(t, uint64(101), updatedNonce.Uint64())
+}
+
+func TestReleaseNonce_MultipleNetworks(t *testing.T) {
+	setup := newTestSetup(t)
+	wallet := testAddr1
+	network1 := networks.EthereumMainnet
+	network2 := networks.BSCMainnet
+
+	// Acquire nonces on both networks
+	setup.Reader.GetMinedNonceFn = func(addr string) (uint64, error) { return 0, nil }
+	setup.Reader.GetPendingNonceFn = func(addr string) (uint64, error) { return 0, nil }
+
+	nonce1, _ := setup.WM.acquireNonce(wallet, network1)
+	nonce2, _ := setup.WM.acquireNonce(wallet, network2)
+
+	// Release on network1
+	setup.WM.ReleaseNonce(wallet, network1, nonce1.Uint64())
+
+	// Acquire again on network1 - should get same nonce
+	newNonce1, _ := setup.WM.acquireNonce(wallet, network1)
+	assert.Equal(t, nonce1.Uint64(), newNonce1.Uint64())
+
+	// Network2 should be unaffected - next acquire should increment
+	newNonce2, _ := setup.WM.acquireNonce(wallet, network2)
+	assert.Equal(t, nonce2.Uint64()+1, newNonce2.Uint64())
+}
+
+func TestAcquireNonce_ReturnsError_WhenAbnormalState(t *testing.T) {
+	setup := newTestSetup(t)
+	wallet := testAddr1
+
+	// Set up local nonce first
+	setup.WM.setPendingNonce(wallet, networks.EthereumMainnet, 5)
+
+	// Configure reader to return abnormal state: mined > pending
+	setup.Reader.GetMinedNonceFn = func(addr string) (uint64, error) { return 10, nil }
+	setup.Reader.GetPendingNonceFn = func(addr string) (uint64, error) { return 5, nil }
+
+	nonce, err := setup.WM.acquireNonce(wallet, networks.EthereumMainnet)
+
+	assert.Nil(t, nonce)
+	assert.Error(t, err)
+	// The error should come from the nonce tracker
+}
+
+func TestHandleNonceIsLowError_StatusDoneButTxNotInMap_Continues(t *testing.T) {
+	setup := newTestSetup(t)
+
+	oldTx := newTestTx(5, testAddr2, oneEth)
+	differentTx := newTestTx(7, testAddr3, oneEth)
+
+	// Status returns "done" for oldTx, but oldTx is not actually in OldTxs
+	setup.Reader.TxInfoFromHashFn = func(hash string) (TxInfo, error) {
+		// This will be called with differentTx's hash
+		return TxInfo{Status: "pending"}, nil
+	}
+
+	newTx := newTestTx(6, testAddr2, oneEth)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		OldTxs: map[string]*types.Transaction{
+			// Only differentTx in the map, but it's "pending"
+			differentTx.Hash().Hex(): differentTx,
+		},
+		Network: networks.EthereumMainnet,
+	}
+
+	result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+	// Should retry since no completed tx was found
+	assert.True(t, result.ShouldRetry)
+	assert.False(t, result.ShouldReturn)
+
+	// Make oldTx hash not in map to verify the edge case
+	// Verify OldTxs doesn't have the oldTx
+	_, exists := execCtx.OldTxs[oldTx.Hash().Hex()]
+	assert.False(t, exists)
+}
+
+func TestHandleNonceIsLowError_HashMismatch_Continues(t *testing.T) {
+	setup := newTestSetup(t)
+
+	oldTx := newTestTx(5, testAddr2, oneEth)
+	anotherTx := newTestTx(7, testAddr2, oneEth)
+
+	// Status is "done" for a different hash than what's in OldTxs
+	setup.Reader.TxInfoFromHashFn = func(hash string) (TxInfo, error) {
+		// Return done for the oldTx hash
+		if hash == oldTx.Hash().Hex() {
+			return TxInfo{Status: "done"}, nil
+		}
+		return TxInfo{Status: "pending"}, nil
+	}
+
+	newTx := newTestTx(6, testAddr2, oneEth)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		OldTxs: map[string]*types.Transaction{
+			// Different tx hash stored
+			anotherTx.Hash().Hex(): anotherTx,
+		},
+		Network: networks.EthereumMainnet,
+	}
+
+	result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+	// Should retry since the matching hash is not in OldTxs
+	assert.True(t, result.ShouldRetry)
+	assert.False(t, result.ShouldReturn)
+}

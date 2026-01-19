@@ -1,0 +1,2620 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>walletarmy: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/tranvictor/walletarmy/adapters.go (55.6%)</option>
+				
+				<option value="file1">github.com/tranvictor/walletarmy/broadcast_error.go (96.4%)</option>
+				
+				<option value="file2">github.com/tranvictor/walletarmy/error_decoder.go (100.0%)</option>
+				
+				<option value="file3">github.com/tranvictor/walletarmy/execution_context.go (100.0%)</option>
+				
+				<option value="file4">github.com/tranvictor/walletarmy/manager.go (85.7%)</option>
+				
+				<option value="file5">github.com/tranvictor/walletarmy/manager_network.go (92.5%)</option>
+				
+				<option value="file6">github.com/tranvictor/walletarmy/manager_nonce.go (94.1%)</option>
+				
+				<option value="file7">github.com/tranvictor/walletarmy/manager_tx.go (71.3%)</option>
+				
+				<option value="file8">github.com/tranvictor/walletarmy/options.go (100.0%)</option>
+				
+				<option value="file9">github.com/tranvictor/walletarmy/request.go (79.5%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">// adapters.go provides adapter implementations that wrap jarvis types
+// to implement the minimal interfaces defined in deps.go.
+package walletarmy
+
+import (
+        "math/big"
+        "time"
+
+        "github.com/ethereum/go-ethereum/common"
+        "github.com/ethereum/go-ethereum/core/types"
+        "github.com/ethereum/go-ethereum/ethclient/gethclient"
+        jarviscommon "github.com/tranvictor/jarvis/common"
+        "github.com/tranvictor/jarvis/networks"
+        "github.com/tranvictor/jarvis/util"
+        "github.com/tranvictor/jarvis/util/broadcaster"
+        "github.com/tranvictor/jarvis/util/monitor"
+        "github.com/tranvictor/jarvis/util/reader"
+)
+
+// readerAdapter wraps jarvis reader.EthReader to implement our EthReader interface
+type readerAdapter struct {
+        reader *reader.EthReader
+}
+
+func (r *readerAdapter) GetMinedNonce(addr string) (uint64, error) <span class="cov8" title="1">{
+        return r.reader.GetMinedNonce(addr)
+}</span>
+
+func (r *readerAdapter) GetPendingNonce(addr string) (uint64, error) <span class="cov8" title="1">{
+        return r.reader.GetPendingNonce(addr)
+}</span>
+
+func (r *readerAdapter) EstimateExactGas(from, to string, gasPrice float64, value *big.Int, data []byte) (uint64, error) <span class="cov8" title="1">{
+        return r.reader.EstimateExactGas(from, to, gasPrice, value, data)
+}</span>
+
+func (r *readerAdapter) SuggestedGasSettings() (float64, float64, error) <span class="cov8" title="1">{
+        return r.reader.SuggestedGasSettings()
+}</span>
+
+func (r *readerAdapter) EthCall(from, to string, data []byte, overrides *map[common.Address]gethclient.OverrideAccount) ([]byte, error) <span class="cov8" title="1">{
+        return r.reader.EthCall(from, to, data, overrides)
+}</span>
+
+func (r *readerAdapter) TxInfoFromHash(hash string) (TxInfo, error) <span class="cov0" title="0">{
+        info, err := r.reader.TxInfoFromHash(hash)
+        if err != nil </span><span class="cov0" title="0">{
+                return TxInfo{}, err
+        }</span>
+        <span class="cov0" title="0">return TxInfo{
+                Status:  info.Status,
+                Receipt: info.Receipt,
+        }, nil</span>
+}
+
+// NewReaderAdapter creates an EthReader from a jarvis reader
+func NewReaderAdapter(r *reader.EthReader) EthReader <span class="cov8" title="1">{
+        return &amp;readerAdapter{reader: r}
+}</span>
+
+// broadcasterAdapter wraps jarvis broadcaster.Broadcaster to implement our EthBroadcaster interface
+type broadcasterAdapter struct {
+        broadcaster *broadcaster.Broadcaster
+}
+
+func (b *broadcasterAdapter) BroadcastTx(tx *types.Transaction) (string, bool, error) <span class="cov0" title="0">{
+        return b.broadcaster.BroadcastTx(tx)
+}</span>
+
+func (b *broadcasterAdapter) BroadcastTxSync(tx *types.Transaction) (*types.Receipt, error) <span class="cov0" title="0">{
+        return b.broadcaster.BroadcastTxSync(tx)
+}</span>
+
+// NewBroadcasterAdapter creates an EthBroadcaster from a jarvis broadcaster
+func NewBroadcasterAdapter(b *broadcaster.Broadcaster) EthBroadcaster <span class="cov8" title="1">{
+        return &amp;broadcasterAdapter{broadcaster: b}
+}</span>
+
+// txMonitorAdapter wraps jarvis monitor.TxMonitor to implement our TxMonitor interface
+type txMonitorAdapter struct {
+        monitor *monitor.TxMonitor
+}
+
+func (m *txMonitorAdapter) MakeWaitChannelWithInterval(txHash string, interval time.Duration) &lt;-chan TxMonitorStatus <span class="cov0" title="0">{
+        jarvisChan := m.monitor.MakeWaitChannelWithInterval(txHash, interval)
+        resultChan := make(chan TxMonitorStatus, 1)
+
+        go func() </span><span class="cov0" title="0">{
+                defer close(resultChan)
+                status := &lt;-jarvisChan
+                resultChan &lt;- TxMonitorStatus{
+                        Status:  status.Status,
+                        Receipt: status.Receipt,
+                }
+        }</span>()
+
+        <span class="cov0" title="0">return resultChan</span>
+}
+
+// NewTxMonitorAdapter creates a TxMonitor from a jarvis monitor
+func NewTxMonitorAdapter(m *monitor.TxMonitor) TxMonitor <span class="cov8" title="1">{
+        return &amp;txMonitorAdapter{monitor: m}
+}</span>
+
+// DefaultReaderFactory is the default factory that creates jarvis readers
+func DefaultReaderFactory(network networks.Network) (EthReader, error) <span class="cov8" title="1">{
+        r, err := util.EthReader(network)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+        <span class="cov8" title="1">return NewReaderAdapter(r), nil</span>
+}
+
+// DefaultBroadcasterFactory is the default factory that creates jarvis broadcasters
+func DefaultBroadcasterFactory(network networks.Network) (EthBroadcaster, error) <span class="cov8" title="1">{
+        b, err := util.EthBroadcaster(network)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+        <span class="cov8" title="1">return NewBroadcasterAdapter(b), nil</span>
+}
+
+// DefaultTxMonitorFactory is the default factory that creates jarvis tx monitors.
+// If the reader is a readerAdapter (wrapping a jarvis reader), it uses the underlying reader.
+// Otherwise, it returns nil (custom implementations should provide their own monitor factory).
+func DefaultTxMonitorFactory(r EthReader) TxMonitor <span class="cov8" title="1">{
+        if jarvisReader := jarvisReaderFromInterface(r); jarvisReader != nil </span><span class="cov8" title="1">{
+                return NewTxMonitorAdapter(monitor.NewGenericTxMonitor(jarvisReader))
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// jarvisReaderFromInterface extracts the underlying jarvis reader if available
+// This is needed for some internal operations that require the concrete type
+func jarvisReaderFromInterface(r EthReader) *reader.EthReader <span class="cov8" title="1">{
+        if adapter, ok := r.(*readerAdapter); ok </span><span class="cov8" title="1">{
+                return adapter.reader
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// jarvisTxInfoToInternal converts jarviscommon.TxInfo to our TxInfo
+func jarvisTxInfoToInternal(info jarviscommon.TxInfo) TxInfo <span class="cov0" title="0">{
+        return TxInfo{
+                Status:  info.Status,
+                Receipt: info.Receipt,
+        }
+}</span>
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package walletarmy
+
+import (
+        "fmt"
+        "strings"
+)
+
+type BroadcastError error
+
+var (
+        ErrInsufficientFund = BroadcastError(fmt.Errorf("insufficient fund"))
+        ErrNonceIsLow       = BroadcastError(fmt.Errorf("nonce is low"))
+        ErrGasLimitIsTooLow = BroadcastError(fmt.Errorf("gas limit is too low"))
+        ErrTxIsKnown        = BroadcastError(fmt.Errorf("tx is known"))
+)
+
+func NewBroadcastError(err error) BroadcastError <span class="cov8" title="1">{
+        if err == nil </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+
+        // Check error conditions in priority order
+        <span class="cov8" title="1">if IsInsufficientFund(err) </span><span class="cov8" title="1">{
+                return ErrInsufficientFund
+        }</span>
+        <span class="cov8" title="1">if IsNonceIsLow(err) </span><span class="cov8" title="1">{
+                return ErrNonceIsLow
+        }</span>
+        <span class="cov8" title="1">if IsGasLimitIsTooLow(err) </span><span class="cov8" title="1">{
+                return ErrGasLimitIsTooLow
+        }</span>
+        <span class="cov8" title="1">if IsTxIsKnown(err) </span><span class="cov8" title="1">{
+                return ErrTxIsKnown
+        }</span>
+
+        <span class="cov0" title="0">return BroadcastError(err)</span>
+}
+
+func IsTxIsKnown(err error) bool <span class="cov8" title="1">{
+        return strings.Contains(err.Error(), "already known") || strings.Contains(err.Error(), "known transaction")
+}</span>
+
+func IsGasLimitIsTooLow(err error) bool <span class="cov8" title="1">{
+        hasGasTooLow := strings.Contains(err.Error(), "gas limit") &amp;&amp; strings.Contains(err.Error(), "low")
+        hasIntrinsicGasTooLow := strings.Contains(err.Error(), "intrinsic gas") &amp;&amp; strings.Contains(err.Error(), "low")
+        hasGasLimitReach := strings.Contains(err.Error(), "gas limit") &amp;&amp; strings.Contains(err.Error(), "reach")
+        return hasGasTooLow || hasIntrinsicGasTooLow || hasGasLimitReach
+}</span>
+
+func IsNonceIsLow(err error) bool <span class="cov8" title="1">{
+        hasNonceAndLow := strings.Contains(err.Error(), "nonce") &amp;&amp; strings.Contains(err.Error(), "low")
+        hasUnderprice := strings.Contains(err.Error(), "underprice")
+        hasNonceAlreadyExist := strings.Contains(err.Error(), "nonce") &amp;&amp; strings.Contains(err.Error(), "already exist")
+        return hasNonceAndLow || hasUnderprice || hasNonceAlreadyExist
+}</span>
+
+func IsInsufficientFund(err error) bool <span class="cov8" title="1">{
+        if err == nil </span><span class="cov8" title="1">{
+                return false
+        }</span>
+        <span class="cov8" title="1">errMsg := err.Error()
+        hasInsufficientFunds := strings.Contains(errMsg, "insufficient funds")
+        hasInsufficientBalance := strings.Contains(errMsg, "insufficient balance")
+        hasNotEnoughFunds := strings.Contains(errMsg, "not enough funds")
+        hasBalanceTooLow := strings.Contains(errMsg, "balance too low")
+        return hasInsufficientFunds || hasInsufficientBalance || hasNotEnoughFunds || hasBalanceTooLow</span>
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">// Author: https://github.com/piavgh
+
+package walletarmy
+
+import (
+        "encoding/hex"
+        "errors"
+        "fmt"
+        "strings"
+
+        "github.com/ethereum/go-ethereum/accounts/abi"
+        "github.com/ethereum/go-ethereum/rpc"
+)
+
+type ErrorDecoder struct {
+        errorBySelector map[string]abi.Error // map from error selector to ABI error
+}
+
+func NewErrorDecoder(abis ...abi.ABI) (*ErrorDecoder, error) <span class="cov8" title="1">{
+        if len(abis) == 0 </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("at least one ABI must be provided")
+        }</span>
+
+        <span class="cov8" title="1">errorBySelector := make(map[string]abi.Error)
+
+        for _, abi := range abis </span><span class="cov8" title="1">{
+                for _, err := range abi.Errors </span><span class="cov8" title="1">{
+                        selector := hex.EncodeToString(err.ID[:4])
+                        errorBySelector[selector] = err
+                }</span>
+        }
+
+        <span class="cov8" title="1">return &amp;ErrorDecoder{
+                errorBySelector: errorBySelector,
+        }, nil</span>
+}
+
+// Decode decodes the error from a contract call.
+// It should always wrap the original error (using %w).
+// It can only decode Solidity custom errors https://soliditylang.org/blog/2021/04/21/custom-errors/
+func (d *ErrorDecoder) Decode(err error) (abiError *abi.Error, errorParams any, resultErr error) <span class="cov8" title="1">{
+        origErr := err
+        var dataErr rpc.DataError
+        if !errors.As(err, &amp;dataErr) </span><span class="cov8" title="1">{
+                return nil, nil, fmt.Errorf("not a Solidity custom error: %w", err)
+        }</span>
+
+        <span class="cov8" title="1">errorData := dataErr.ErrorData()
+        if errorData == nil </span><span class="cov8" title="1">{
+                return nil, nil, fmt.Errorf("no error data, original error: %w", origErr)
+        }</span>
+
+        <span class="cov8" title="1">hexStr, ok := errorData.(string)
+        if !ok </span><span class="cov8" title="1">{
+                return nil, nil, fmt.Errorf("error data is not string, original error: %w", origErr)
+        }</span>
+
+        <span class="cov8" title="1">hexStr = strings.TrimPrefix(hexStr, "0x")
+        errorBytes, decodeErr := hex.DecodeString(hexStr)
+        if decodeErr != nil </span><span class="cov8" title="1">{
+                return nil, nil, fmt.Errorf("failed to decode error data: %v, original error: %w", decodeErr, origErr)
+        }</span>
+
+        <span class="cov8" title="1">if len(errorBytes) &lt; 4 </span><span class="cov8" title="1">{
+                return nil, nil, fmt.Errorf("invalid error data length, original error: %w", origErr)
+        }</span>
+
+        <span class="cov8" title="1">errorSelector := hex.EncodeToString(errorBytes[:4])
+        if abiError, exists := d.errorBySelector[errorSelector]; exists </span><span class="cov8" title="1">{
+                errParams, unpackErr := abiError.Unpack(errorBytes)
+                if unpackErr != nil </span><span class="cov8" title="1">{
+                        return &amp;abiError, nil, fmt.Errorf("failed to unpack error selector %s: %v, original error: %w", abiError.Name, unpackErr, origErr)
+                }</span>
+
+                <span class="cov8" title="1">return &amp;abiError, errParams, fmt.Errorf("contract error: %s with params: %v, original error: %w", abiError.Name, errParams, origErr)</span>
+        }
+
+        <span class="cov8" title="1">return nil, nil, fmt.Errorf("unknown error: 0x%s, original error: %w", errorSelector, origErr)</span>
+}
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">package walletarmy
+
+import (
+        "errors"
+        "fmt"
+        "math/big"
+        "time"
+
+        "github.com/ethereum/go-ethereum/accounts/abi"
+        "github.com/ethereum/go-ethereum/common"
+        "github.com/ethereum/go-ethereum/core/types"
+        jarviscommon "github.com/tranvictor/jarvis/common"
+        "github.com/tranvictor/jarvis/networks"
+)
+
+// TxExecutionContext holds the state and parameters for transaction execution.
+// All fields are public to allow for testing and advanced customization.
+type TxExecutionContext struct {
+        // Retry tracking
+        ActualRetryCount int
+
+        // Configuration
+        NumRetries      int
+        SleepDuration   time.Duration
+        TxCheckInterval time.Duration
+
+        // Transaction parameters
+        TxType        uint8
+        From, To      common.Address
+        Value         *big.Int
+        GasLimit      uint64
+        ExtraGasLimit uint64
+        Data          []byte
+        Network       networks.Network
+
+        // Gas pricing (mutable during retries)
+        RetryGasPrice   float64
+        ExtraGasPrice   float64
+        RetryTipCap     float64
+        ExtraTipCapGwei float64
+
+        // Gas price protection limits (caller-defined)
+        MaxGasPrice float64
+        MaxTipCap   float64
+
+        // Transaction state
+        OldTxs     map[string]*types.Transaction
+        RetryNonce *big.Int
+
+        // Hooks
+        BeforeSignAndBroadcastHook Hook
+        AfterSignAndBroadcastHook  Hook
+        GasEstimationFailedHook    GasEstimationFailedHook
+        SimulationFailedHook       SimulationFailedHook
+        TxMinedHook                TxMinedHook
+        ABIs                       []abi.ABI
+}
+
+// NewTxExecutionContext creates a new transaction execution context
+func NewTxExecutionContext(
+        numRetries int,
+        sleepDuration time.Duration,
+        txCheckInterval time.Duration,
+        txType uint8,
+        from, to common.Address,
+        value *big.Int,
+        gasLimit uint64, extraGasLimit uint64,
+        gasPrice float64, extraGasPrice float64,
+        tipCapGwei float64, extraTipCapGwei float64,
+        maxGasPrice float64, maxTipCap float64,
+        data []byte,
+        network networks.Network,
+        beforeSignAndBroadcastHook Hook,
+        afterSignAndBroadcastHook Hook,
+        abis []abi.ABI,
+        gasEstimationFailedHook GasEstimationFailedHook,
+        simulationFailedHook SimulationFailedHook,
+        txMinedHook TxMinedHook,
+) (*TxExecutionContext, error) <span class="cov8" title="1">{
+        // Validate inputs
+        if numRetries &lt; 0 </span><span class="cov8" title="1">{
+                numRetries = 0
+        }</span>
+        <span class="cov8" title="1">if sleepDuration &lt;= 0 </span><span class="cov8" title="1">{
+                sleepDuration = DefaultSleepDuration
+        }</span>
+        <span class="cov8" title="1">if txCheckInterval &lt;= 0 </span><span class="cov8" title="1">{
+                txCheckInterval = DefaultTxCheckInterval
+        }</span>
+
+        // Validate addresses
+        <span class="cov8" title="1">if from == (common.Address{}) </span><span class="cov8" title="1">{
+                return nil, ErrFromAddressZero
+        }</span>
+
+        // Validate network
+        <span class="cov8" title="1">if network == nil </span><span class="cov8" title="1">{
+                return nil, ErrNetworkNil
+        }</span>
+
+        // Initialize value if nil
+        <span class="cov8" title="1">if value == nil </span><span class="cov8" title="1">{
+                value = big.NewInt(0)
+        }</span>
+
+        // Set default maxGasPrice and maxTipCap if they are 0 (to avoid infinite loop)
+        <span class="cov8" title="1">if maxGasPrice == 0 </span><span class="cov8" title="1">{
+                maxGasPrice = gasPrice * MaxCapMultiplier
+        }</span>
+        <span class="cov8" title="1">if maxTipCap == 0 </span><span class="cov8" title="1">{
+                maxTipCap = tipCapGwei * MaxCapMultiplier
+        }</span>
+
+        <span class="cov8" title="1">return &amp;TxExecutionContext{
+                ActualRetryCount:           0,
+                NumRetries:                 numRetries,
+                SleepDuration:              sleepDuration,
+                TxCheckInterval:            txCheckInterval,
+                TxType:                     txType,
+                From:                       from,
+                To:                         to,
+                Value:                      value,
+                GasLimit:                   gasLimit,
+                ExtraGasLimit:              extraGasLimit,
+                RetryGasPrice:              gasPrice,
+                ExtraGasPrice:              extraGasPrice,
+                RetryTipCap:                tipCapGwei,
+                ExtraTipCapGwei:            extraTipCapGwei,
+                MaxGasPrice:                maxGasPrice,
+                MaxTipCap:                  maxTipCap,
+                Data:                       data,
+                Network:                    network,
+                OldTxs:                     make(map[string]*types.Transaction),
+                RetryNonce:                 nil,
+                BeforeSignAndBroadcastHook: beforeSignAndBroadcastHook,
+                AfterSignAndBroadcastHook:  afterSignAndBroadcastHook,
+                ABIs:                       abis,
+                GasEstimationFailedHook:    gasEstimationFailedHook,
+                SimulationFailedHook:       simulationFailedHook,
+                TxMinedHook:                txMinedHook,
+        }, nil</span>
+}
+
+// AdjustGasPricesForSlowTx adjusts gas prices when a transaction is slow.
+// Returns true if adjustment was applied, false if limits were reached.
+func (ctx *TxExecutionContext) AdjustGasPricesForSlowTx(tx *types.Transaction) bool <span class="cov8" title="1">{
+        if tx == nil </span><span class="cov8" title="1">{
+                return false
+        }</span>
+
+        // Increase gas price by configured percentage
+        <span class="cov8" title="1">currentGasPrice := jarviscommon.BigToFloat(tx.GasPrice(), 9)
+        newGasPrice := currentGasPrice * GasPriceIncreasePercent
+
+        // Check if new gas price would exceed the caller-defined maximum
+        if ctx.MaxGasPrice &gt; 0 &amp;&amp; newGasPrice &gt; ctx.MaxGasPrice </span><span class="cov8" title="1">{
+                // Gas price would exceed limit - stop trying
+                return false
+        }</span>
+
+        <span class="cov8" title="1">ctx.RetryGasPrice = newGasPrice
+
+        // Increase tip cap by configured percentage
+        currentTipCap := jarviscommon.BigToFloat(tx.GasTipCap(), 9)
+        newTipCap := currentTipCap * TipCapIncreasePercent
+
+        // Check if new tip cap would exceed the caller-defined maximum
+        if ctx.MaxTipCap &gt; 0 &amp;&amp; newTipCap &gt; ctx.MaxTipCap </span><span class="cov8" title="1">{
+                // Tip cap would exceed limit - stop trying
+                return false
+        }</span>
+
+        <span class="cov8" title="1">ctx.RetryTipCap = newTipCap
+
+        // Keep the same nonce
+        ctx.RetryNonce = big.NewInt(int64(tx.Nonce()))
+
+        return true</span>
+}
+
+// IncrementRetryCountAndCheck increments retry count and checks if we've exceeded retries.
+func (ctx *TxExecutionContext) IncrementRetryCountAndCheck(errorMsg string) *TxExecutionResult <span class="cov8" title="1">{
+        ctx.ActualRetryCount++
+        if ctx.ActualRetryCount &gt; ctx.NumRetries </span><span class="cov8" title="1">{
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  false,
+                        ShouldReturn: true,
+                        Error:        errors.Join(ErrEnsureTxOutOfRetries, fmt.Errorf("%s after %d retries", errorMsg, ctx.NumRetries)),
+                }
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file4" style="display: none">package walletarmy
+
+import (
+        "fmt"
+        "sync"
+
+        "github.com/ethereum/go-ethereum/common"
+        "github.com/tranvictor/jarvis/accounts"
+        "github.com/tranvictor/jarvis/networks"
+        "github.com/tranvictor/jarvis/util/account"
+
+        "github.com/tranvictor/walletarmy/idempotency"
+        "github.com/tranvictor/walletarmy/internal/circuitbreaker"
+        "github.com/tranvictor/walletarmy/internal/nonce"
+)
+
+// NetworkReaderFactory creates an EthReader for a given network.
+// This allows injecting mock readers for testing.
+type NetworkReaderFactory func(network networks.Network) (EthReader, error)
+
+// NetworkBroadcasterFactory creates an EthBroadcaster for a given network.
+// This allows injecting mock broadcasters for testing.
+type NetworkBroadcasterFactory func(network networks.Network) (EthBroadcaster, error)
+
+// NetworkTxMonitorFactory creates a TxMonitor for a given reader.
+// This allows injecting mock monitors for testing.
+type NetworkTxMonitorFactory func(reader EthReader) TxMonitor
+
+// WalletManager manages
+//  1. multiple wallets and their informations in its
+//     life time. It basically gives next nonce to do transaction for specific
+//     wallet and specific network.
+//     It queries the node to check the nonce in lazy maner, it also takes mining
+//     txs into account.
+//  2. multiple networks gas price. The gas price will be queried lazily prior to txs
+//     and will be stored as cache for a while
+//  3. txs in the context manager's life time
+//  4. circuit breakers for RPC node failover
+//  5. idempotency keys for preventing duplicate transactions
+//  6. default configuration that TxRequest inherits
+type WalletManager struct {
+        // Lock for defaults access (protects the defaults struct)
+        defaultsMu sync.RWMutex
+
+        // Default configuration inherited by TxRequest
+        defaults ManagerDefaults
+
+        // Network-level locks (keyed by chainID)
+        networkLocks sync.Map // map[uint64]*sync.RWMutex
+
+        // Wallet-level locks (keyed by address)
+        walletLocks sync.Map // map[common.Address]*sync.RWMutex
+
+        // readers stores all reader instances for all networks that ever interacts
+        // with accounts manager. ChainID of the network is used as the key.
+        readers      sync.Map // map[uint64]EthReader
+        broadcasters sync.Map // map[uint64]EthBroadcaster
+        analyzers    sync.Map // map[uint64]*txanalyzer.TxAnalyzer
+        txMonitors   sync.Map // map[uint64]TxMonitor
+
+        // Circuit breakers for each network (keyed by chainID)
+        circuitBreakers sync.Map // map[uint64]*circuitbreaker.CircuitBreaker
+
+        // accounts keyed by address
+        accounts sync.Map // map[common.Address]*account.Account
+
+        // Nonce tracker for managing wallet nonces across networks
+        nonceTracker *nonce.Tracker
+
+        // txs map between (address, network, nonce) =&gt; tx
+        // Protected by wallet-level locks
+        txs sync.Map // map[common.Address]map[uint64]map[uint64]*types.Transaction
+
+        // gasPrices map between network =&gt; gasinfo
+        // Protected by network-level locks
+        gasSettings sync.Map // map[uint64]*GasInfo
+
+        // Idempotency store for preventing duplicate transactions
+        idempotencyStore idempotency.Store
+
+        // Factories for creating network components (injectable for testing)
+        readerFactory      NetworkReaderFactory
+        broadcasterFactory NetworkBroadcasterFactory
+        txMonitorFactory   NetworkTxMonitorFactory
+}
+
+// NewWalletManager creates a new WalletManager with optional configuration
+func NewWalletManager(opts ...WalletManagerOption) *WalletManager <span class="cov8" title="1">{
+        wm := &amp;WalletManager{
+                nonceTracker: nonce.NewTracker(),
+        }
+
+        for _, opt := range opts </span><span class="cov8" title="1">{
+                opt(wm)
+        }</span>
+
+        // Set default factories if not provided
+        <span class="cov8" title="1">if wm.readerFactory == nil </span><span class="cov8" title="1">{
+                wm.readerFactory = DefaultReaderFactory
+        }</span>
+        <span class="cov8" title="1">if wm.broadcasterFactory == nil </span><span class="cov8" title="1">{
+                wm.broadcasterFactory = DefaultBroadcasterFactory
+        }</span>
+        <span class="cov8" title="1">if wm.txMonitorFactory == nil </span><span class="cov8" title="1">{
+                wm.txMonitorFactory = DefaultTxMonitorFactory
+        }</span>
+
+        <span class="cov8" title="1">return wm</span>
+}
+
+// Defaults returns the current default configuration
+func (wm *WalletManager) Defaults() ManagerDefaults <span class="cov8" title="1">{
+        wm.defaultsMu.RLock()
+        defer wm.defaultsMu.RUnlock()
+        return wm.defaults
+}</span>
+
+// SetDefaults updates the default configuration
+func (wm *WalletManager) SetDefaults(defaults ManagerDefaults) <span class="cov8" title="1">{
+        wm.defaultsMu.Lock()
+        defer wm.defaultsMu.Unlock()
+        wm.defaults = defaults
+}</span>
+
+// IdempotencyStore returns the configured idempotency store, or nil if not configured
+func (wm *WalletManager) IdempotencyStore() idempotency.Store <span class="cov8" title="1">{
+        return wm.idempotencyStore
+}</span>
+
+// getNetworkLock returns the lock for a specific network, creating it if necessary
+func (wm *WalletManager) getNetworkLock(chainID uint64) *sync.RWMutex <span class="cov8" title="1">{
+        lock, _ := wm.networkLocks.LoadOrStore(chainID, &amp;sync.RWMutex{})
+        return lock.(*sync.RWMutex)
+}</span>
+
+// getWalletLock returns the lock for a specific wallet, creating it if necessary
+func (wm *WalletManager) getWalletLock(wallet common.Address) *sync.RWMutex <span class="cov8" title="1">{
+        lock, _ := wm.walletLocks.LoadOrStore(wallet, &amp;sync.RWMutex{})
+        return lock.(*sync.RWMutex)
+}</span>
+
+// getCircuitBreaker returns the circuit breaker for a network, creating one if necessary
+func (wm *WalletManager) getCircuitBreaker(chainID uint64) *circuitbreaker.CircuitBreaker <span class="cov8" title="1">{
+        cb, _ := wm.circuitBreakers.LoadOrStore(chainID, circuitbreaker.New(circuitbreaker.DefaultConfig()))
+        return cb.(*circuitbreaker.CircuitBreaker)
+}</span>
+
+// SetAccount registers an account with the wallet manager
+func (wm *WalletManager) SetAccount(acc *account.Account) <span class="cov8" title="1">{
+        wm.accounts.Store(acc.Address(), acc)
+}</span>
+
+// UnlockAccount unlocks an account from the jarvis wallet store and registers it
+func (wm *WalletManager) UnlockAccount(addr common.Address) (*account.Account, error) <span class="cov8" title="1">{
+        accDesc, err := accounts.GetAccount(addr.Hex())
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("wallet %s doesn't exist in jarvis", addr.Hex())
+        }</span>
+        <span class="cov0" title="0">acc, err := accounts.UnlockAccount(accDesc)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("unlocking wallet failed: %w", err)
+        }</span>
+        <span class="cov0" title="0">wm.SetAccount(acc)
+        return acc, nil</span>
+}
+
+// Account returns the account for the given wallet address
+func (wm *WalletManager) Account(wallet common.Address) *account.Account <span class="cov8" title="1">{
+        if acc, ok := wm.accounts.Load(wallet); ok </span><span class="cov8" title="1">{
+                return acc.(*account.Account)
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file5" style="display: none">package walletarmy
+
+import (
+        "fmt"
+        "time"
+
+        "github.com/ethereum/go-ethereum/common"
+        "github.com/ethereum/go-ethereum/core/types"
+        "github.com/tranvictor/jarvis/networks"
+        "github.com/tranvictor/jarvis/txanalyzer"
+        "github.com/tranvictor/jarvis/util"
+
+        "github.com/tranvictor/walletarmy/internal/circuitbreaker"
+)
+
+func (wm *WalletManager) getBroadcaster(network networks.Network) EthBroadcaster <span class="cov8" title="1">{
+        if b, ok := wm.broadcasters.Load(network.GetChainID()); ok </span><span class="cov8" title="1">{
+                return b.(EthBroadcaster)
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// Broadcaster returns the broadcaster for the given network.
+// Returns an error if the network could not be initialized or if the circuit breaker is open.
+func (wm *WalletManager) Broadcaster(network networks.Network) (EthBroadcaster, error) <span class="cov8" title="1">{
+        // Check circuit breaker
+        cb := wm.getCircuitBreaker(network.GetChainID())
+        if !cb.Allow() </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("%w for network %s", ErrCircuitBreakerOpen, network)
+        }</span>
+
+        <span class="cov8" title="1">b := wm.getBroadcaster(network)
+        if b == nil </span><span class="cov8" title="1">{
+                err := wm.initNetwork(network)
+                if err != nil </span><span class="cov8" title="1">{
+                        cb.RecordFailure()
+                        return nil, fmt.Errorf("couldn't init broadcaster for network %s: %w", network, err)
+                }</span>
+                <span class="cov8" title="1">b = wm.getBroadcaster(network)</span>
+        }
+        <span class="cov8" title="1">cb.RecordSuccess()
+        return b, nil</span>
+}
+
+func (wm *WalletManager) getReader(network networks.Network) EthReader <span class="cov8" title="1">{
+        if r, ok := wm.readers.Load(network.GetChainID()); ok </span><span class="cov8" title="1">{
+                return r.(EthReader)
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// Reader returns the reader for the given network.
+// Returns an error if the network could not be initialized or if the circuit breaker is open.
+func (wm *WalletManager) Reader(network networks.Network) (EthReader, error) <span class="cov8" title="1">{
+        // Check circuit breaker
+        cb := wm.getCircuitBreaker(network.GetChainID())
+        if !cb.Allow() </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("%w for network %s", ErrCircuitBreakerOpen, network)
+        }</span>
+
+        <span class="cov8" title="1">r := wm.getReader(network)
+        if r == nil </span><span class="cov8" title="1">{
+                err := wm.initNetwork(network)
+                if err != nil </span><span class="cov8" title="1">{
+                        cb.RecordFailure()
+                        return nil, fmt.Errorf("couldn't init reader for network %s: %w", network, err)
+                }</span>
+                <span class="cov8" title="1">r = wm.getReader(network)</span>
+        }
+        <span class="cov8" title="1">cb.RecordSuccess()
+        return r, nil</span>
+}
+
+// RecordNetworkSuccess records a successful network operation for the circuit breaker
+func (wm *WalletManager) RecordNetworkSuccess(network networks.Network) <span class="cov8" title="1">{
+        wm.getCircuitBreaker(network.GetChainID()).RecordSuccess()
+}</span>
+
+// RecordNetworkFailure records a failed network operation for the circuit breaker
+func (wm *WalletManager) RecordNetworkFailure(network networks.Network) <span class="cov8" title="1">{
+        wm.getCircuitBreaker(network.GetChainID()).RecordFailure()
+}</span>
+
+func (wm *WalletManager) getAnalyzer(network networks.Network) *txanalyzer.TxAnalyzer <span class="cov8" title="1">{
+        if a, ok := wm.analyzers.Load(network.GetChainID()); ok </span><span class="cov8" title="1">{
+                return a.(*txanalyzer.TxAnalyzer)
+        }</span>
+        <span class="cov0" title="0">return nil</span>
+}
+
+func (wm *WalletManager) getTxMonitor(network networks.Network) TxMonitor <span class="cov8" title="1">{
+        if m, ok := wm.txMonitors.Load(network.GetChainID()); ok </span><span class="cov8" title="1">{
+                return m.(TxMonitor)
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+// Analyzer returns the transaction analyzer for the given network.
+// Returns an error if the network could not be initialized or if the circuit breaker is open.
+func (wm *WalletManager) Analyzer(network networks.Network) (*txanalyzer.TxAnalyzer, error) <span class="cov8" title="1">{
+        // Check circuit breaker
+        cb := wm.getCircuitBreaker(network.GetChainID())
+        if !cb.Allow() </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("%w for network %s", ErrCircuitBreakerOpen, network)
+        }</span>
+
+        <span class="cov8" title="1">a := wm.getAnalyzer(network)
+        if a == nil </span><span class="cov0" title="0">{
+                err := wm.initNetwork(network)
+                if err != nil </span><span class="cov0" title="0">{
+                        cb.RecordFailure()
+                        return nil, fmt.Errorf("couldn't init analyzer for network %s: %w", network, err)
+                }</span>
+                <span class="cov0" title="0">a = wm.getAnalyzer(network)</span>
+        }
+        <span class="cov8" title="1">cb.RecordSuccess()
+        return a, nil</span>
+}
+
+func (wm *WalletManager) initNetwork(network networks.Network) (err error) <span class="cov8" title="1">{
+        chainID := network.GetChainID()
+        lock := wm.getNetworkLock(chainID)
+        lock.Lock()
+        defer lock.Unlock()
+
+        // Check if reader exists, create if not
+        var r EthReader
+        if existing, ok := wm.readers.Load(chainID); ok </span><span class="cov0" title="0">{
+                r = existing.(EthReader)
+        }</span> else<span class="cov8" title="1"> {
+                r, err = wm.readerFactory(network)
+                if err != nil </span><span class="cov8" title="1">{
+                        return err
+                }</span>
+                <span class="cov8" title="1">wm.readers.Store(chainID, r)</span>
+        }
+
+        // Check if analyzer exists, create if not
+        // Analyzer still uses jarvis reader directly (for compatibility)
+        <span class="cov8" title="1">if _, ok := wm.analyzers.Load(chainID); !ok </span><span class="cov8" title="1">{
+                // Try to get the underlying jarvis reader for the analyzer
+                if jarvisReader := jarvisReaderFromInterface(r); jarvisReader != nil </span><span class="cov8" title="1">{
+                        analyzer := txanalyzer.NewGenericAnalyzer(jarvisReader, network)
+                        wm.analyzers.Store(chainID, analyzer)
+                }</span> else<span class="cov8" title="1"> {
+                        // For custom readers, create a new jarvis reader for the analyzer
+                        jarvisR, err := util.EthReader(network)
+                        if err != nil </span><span class="cov0" title="0">{
+                                return fmt.Errorf("couldn't create analyzer: %w", err)
+                        }</span>
+                        <span class="cov8" title="1">analyzer := txanalyzer.NewGenericAnalyzer(jarvisR, network)
+                        wm.analyzers.Store(chainID, analyzer)</span>
+                }
+        }
+
+        // Check if broadcaster exists, create if not
+        <span class="cov8" title="1">if _, ok := wm.broadcasters.Load(chainID); !ok </span><span class="cov8" title="1">{
+                b, err := wm.broadcasterFactory(network)
+                if err != nil </span><span class="cov8" title="1">{
+                        return err
+                }</span>
+                <span class="cov8" title="1">wm.broadcasters.Store(chainID, b)</span>
+        }
+
+        // Check if tx monitor exists, create if not
+        <span class="cov8" title="1">if _, ok := wm.txMonitors.Load(chainID); !ok </span><span class="cov8" title="1">{
+                txMon := wm.txMonitorFactory(r)
+                if txMon != nil </span><span class="cov8" title="1">{
+                        wm.txMonitors.Store(chainID, txMon)
+                }</span>
+        }
+
+        <span class="cov8" title="1">return nil</span>
+}
+
+// GetCircuitBreakerStats returns the circuit breaker statistics for a network
+func (wm *WalletManager) GetCircuitBreakerStats(network networks.Network) circuitbreaker.Stats <span class="cov8" title="1">{
+        return wm.getCircuitBreaker(network.GetChainID()).Stats()
+}</span>
+
+// ResetCircuitBreaker resets the circuit breaker for a network
+func (wm *WalletManager) ResetCircuitBreaker(network networks.Network) <span class="cov8" title="1">{
+        wm.getCircuitBreaker(network.GetChainID()).Reset()
+}</span>
+
+func (wm *WalletManager) getGasSettingInfo(network networks.Network) *GasInfo <span class="cov8" title="1">{
+        if info, ok := wm.gasSettings.Load(network.GetChainID()); ok </span><span class="cov8" title="1">{
+                return info.(*GasInfo)
+        }</span>
+        <span class="cov8" title="1">return nil</span>
+}
+
+func (wm *WalletManager) setGasInfo(network networks.Network, info *GasInfo) <span class="cov8" title="1">{
+        wm.gasSettings.Store(network.GetChainID(), info)
+}</span>
+
+// GasSetting returns cached gas settings for the network, refreshing if stale.
+func (wm *WalletManager) GasSetting(network networks.Network) (*GasInfo, error) <span class="cov8" title="1">{
+        gasInfo := wm.getGasSettingInfo(network)
+        if gasInfo == nil || time.Since(gasInfo.Timestamp) &gt;= GAS_INFO_TTL </span><span class="cov8" title="1">{
+                // gasInfo is not initiated or outdated
+                r, err := wm.Reader(network)
+                if err != nil </span><span class="cov8" title="1">{
+                        return nil, fmt.Errorf("couldn't get reader for gas settings: %w", err)
+                }</span>
+                <span class="cov8" title="1">gasPrice, gasTipCapGwei, err := r.SuggestedGasSettings()
+                if err != nil </span><span class="cov8" title="1">{
+                        return nil, fmt.Errorf("couldn't get gas settings in context manager: %w", err)
+                }</span>
+
+                <span class="cov8" title="1">info := GasInfo{
+                        GasPrice:         gasPrice,
+                        BaseGasPrice:     nil,
+                        MaxPriorityPrice: gasTipCapGwei,
+                        FeePerGas:        gasPrice,
+                        Timestamp:        time.Now(),
+                }
+                wm.setGasInfo(network, &amp;info)
+                return &amp;info, nil</span>
+        }
+        <span class="cov8" title="1">return wm.getGasSettingInfo(network), nil</span>
+}
+
+func (wm *WalletManager) setTx(wallet common.Address, network networks.Network, tx *types.Transaction) <span class="cov8" title="1">{
+        lock := wm.getWalletLock(wallet)
+        lock.Lock()
+        defer lock.Unlock()
+
+        // Get or create wallet's network map
+        networkMapRaw, _ := wm.txs.LoadOrStore(wallet, make(map[uint64]map[uint64]*types.Transaction))
+        networkMap := networkMapRaw.(map[uint64]map[uint64]*types.Transaction)
+
+        // Get or create network's nonce map
+        if networkMap[network.GetChainID()] == nil </span><span class="cov8" title="1">{
+                networkMap[network.GetChainID()] = map[uint64]*types.Transaction{}
+        }</span>
+
+        <span class="cov8" title="1">networkMap[network.GetChainID()][tx.Nonce()] = tx</span>
+}
+</pre>
+		
+		<pre class="file" id="file6" style="display: none">package walletarmy
+
+import (
+        "fmt"
+        "math/big"
+
+        "github.com/ethereum/go-ethereum/common"
+        "github.com/tranvictor/jarvis/networks"
+)
+
+// setPendingNonce sets the pending nonce for a wallet on a network
+func (wm *WalletManager) setPendingNonce(wallet common.Address, network networks.Network, nonce uint64) <span class="cov8" title="1">{
+        wm.nonceTracker.SetPendingNonce(wallet, network.GetChainID(), network.GetName(), nonce)
+}</span>
+
+// pendingNonce returns the pending nonce for a wallet on a network
+func (wm *WalletManager) pendingNonce(wallet common.Address, network networks.Network) *big.Int <span class="cov8" title="1">{
+        return wm.nonceTracker.GetPendingNonce(wallet, network.GetChainID())
+}</span>
+
+// acquireNonce atomically determines and reserves the next nonce for a transaction.
+// This prevents race conditions where multiple concurrent transactions could get the same nonce.
+// The nonce is reserved immediately, so even if the transaction fails, subsequent calls will get
+// a different nonce. Use ReleaseNonce if you need to release an unused nonce.
+//
+// Logic:
+//  1. Get remote pending nonce and mined nonce from the network
+//  2. Compare with local pending nonce to determine the correct next nonce
+//  3. Atomically reserve the nonce by incrementing local pending nonce
+//  4. Return the reserved nonce
+func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Network) (*big.Int, error) <span class="cov8" title="1">{
+        // Get remote nonces first (before acquiring lock to avoid holding lock during network calls)
+        r, err := wm.Reader(network)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("couldn't get reader: %w", err)
+        }</span>
+
+        <span class="cov8" title="1">minedNonce, err := r.GetMinedNonce(wallet.Hex())
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("couldn't get mined nonce in context manager: %s", err)
+        }</span>
+
+        <span class="cov8" title="1">remotePendingNonce, err := r.GetPendingNonce(wallet.Hex())
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("couldn't get remote pending nonce in context manager: %s", err)
+        }</span>
+
+        // Delegate to the nonce tracker
+        <span class="cov8" title="1">result, err := wm.nonceTracker.AcquireNonce(
+                wallet,
+                network.GetChainID(),
+                network.GetName(),
+                minedNonce,
+                remotePendingNonce,
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, err
+        }</span>
+
+        <span class="cov8" title="1">return big.NewInt(int64(result.Nonce)), nil</span>
+}
+
+// ReleaseNonce releases a previously acquired nonce that was not used.
+// This allows the nonce to be reused by subsequent transactions.
+// Note: This only affects local tracking. If the transaction was already broadcast
+// to some nodes, calling this may cause issues.
+func (wm *WalletManager) ReleaseNonce(wallet common.Address, network networks.Network, nonce uint64) <span class="cov8" title="1">{
+        wm.nonceTracker.ReleaseNonce(wallet, network.GetChainID(), network.GetName(), nonce)
+}</span>
+
+// nonce is deprecated: use acquireNonce instead for race-safe nonce acquisition.
+// This function is kept for backward compatibility but has race conditions
+// when called concurrently for the same wallet/network.
+func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) (*big.Int, error) <span class="cov8" title="1">{
+        return wm.acquireNonce(wallet, network)
+}</span>
+</pre>
+		
+		<pre class="file" id="file7" style="display: none">package walletarmy
+
+import (
+        "context"
+        "errors"
+        "fmt"
+        "math/big"
+        "time"
+
+        "github.com/KyberNetwork/logger"
+        "github.com/ethereum/go-ethereum/accounts/abi"
+        "github.com/ethereum/go-ethereum/common"
+        "github.com/ethereum/go-ethereum/core/types"
+        "github.com/ethereum/go-ethereum/ethclient"
+        jarviscommon "github.com/tranvictor/jarvis/common"
+        "github.com/tranvictor/jarvis/networks"
+)
+
+func (wm *WalletManager) BuildTx(
+        txType uint8,
+        from, to common.Address,
+        nonce *big.Int,
+        value *big.Int,
+        gasLimit uint64,
+        extraGasLimit uint64,
+        gasPrice float64,
+        extraGasPrice float64,
+        tipCapGwei float64,
+        extraTipCapGwei float64,
+        data []byte,
+        network networks.Network,
+) (tx *types.Transaction, err error) <span class="cov8" title="1">{
+        // Track whether we acquired the nonce (for cleanup on failure)
+        var acquiredNonce bool
+        var nonceValue uint64
+
+        // Cleanup function to release nonce if we fail after acquiring it
+        defer func() </span><span class="cov8" title="1">{
+                if err != nil &amp;&amp; acquiredNonce </span><span class="cov0" title="0">{
+                        wm.ReleaseNonce(from, network, nonceValue)
+                }</span>
+        }()
+
+        <span class="cov8" title="1">if gasLimit == 0 </span><span class="cov8" title="1">{
+                r, readerErr := wm.Reader(network)
+                if readerErr != nil </span><span class="cov0" title="0">{
+                        return nil, errors.Join(ErrEstimateGasFailed, fmt.Errorf("couldn't get reader: %w", readerErr))
+                }</span>
+                <span class="cov8" title="1">gasLimit, err = r.EstimateExactGas(
+                        from.Hex(), to.Hex(),
+                        gasPrice,
+                        value,
+                        data,
+                )
+
+                if err != nil </span><span class="cov8" title="1">{
+                        return nil, errors.Join(ErrEstimateGasFailed, fmt.Errorf("couldn't estimate gas. The tx is meant to revert or network error. Detail: %w", err))
+                }</span>
+        }
+
+        <span class="cov8" title="1">if nonce == nil </span><span class="cov8" title="1">{
+                nonce, err = wm.nonce(from, network)
+                if err != nil </span><span class="cov8" title="1">{
+                        return nil, errors.Join(ErrAcquireNonceFailed, fmt.Errorf("couldn't get nonce of the wallet from any nodes: %w", err))
+                }</span>
+                <span class="cov8" title="1">acquiredNonce = true
+                nonceValue = nonce.Uint64()</span>
+        }
+
+        <span class="cov8" title="1">if gasPrice == 0 </span><span class="cov8" title="1">{
+                gasInfo, gasErr := wm.GasSetting(network)
+                if gasErr != nil </span><span class="cov0" title="0">{
+                        err = errors.Join(ErrGetGasSettingFailed, fmt.Errorf("couldn't get gas price info from any nodes: %w", gasErr))
+                        return nil, err
+                }</span>
+                <span class="cov8" title="1">gasPrice = gasInfo.GasPrice
+                tipCapGwei = gasInfo.MaxPriorityPrice</span>
+        }
+
+        <span class="cov8" title="1">gasPriceToUse := gasPrice + extraGasPrice
+        tipCapGweiToUse := tipCapGwei + extraTipCapGwei
+        if tipCapGweiToUse &gt; gasPriceToUse </span><span class="cov0" title="0">{
+                gasPriceToUse = tipCapGweiToUse
+        }</span>
+
+        // Success - clear acquiredNonce so defer doesn't release it
+        <span class="cov8" title="1">acquiredNonce = false
+
+        return jarviscommon.BuildExactTx(
+                txType,
+                nonce.Uint64(),
+                to.Hex(),
+                value,
+                gasLimit+extraGasLimit,
+                gasPriceToUse,
+                tipCapGweiToUse,
+                data,
+                network.GetChainID(),
+        ), nil</span>
+}
+
+func (wm *WalletManager) SignTx(
+        wallet common.Address,
+        tx *types.Transaction,
+        network networks.Network,
+) (signedAddr common.Address, signedTx *types.Transaction, err error) <span class="cov8" title="1">{
+        acc := wm.Account(wallet)
+        if acc == nil </span><span class="cov8" title="1">{
+                acc, err = wm.UnlockAccount(wallet)
+                if err != nil </span><span class="cov8" title="1">{
+                        return common.Address{}, nil, fmt.Errorf(
+                                "the wallet to sign txs is not registered in context manager",
+                        )
+                }</span>
+        }
+        <span class="cov8" title="1">return acc.SignTx(tx, big.NewInt(int64(network.GetChainID())))</span>
+}
+
+func (wm *WalletManager) registerBroadcastedTx(tx *types.Transaction, network networks.Network) error <span class="cov8" title="1">{
+        wallet, err := jarviscommon.GetSignerAddressFromTx(tx, big.NewInt(int64(network.GetChainID())))
+        if err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("couldn't derive sender from the tx data in context manager: %s", err)
+        }</span>
+        // update nonce
+        <span class="cov8" title="1">wm.setPendingNonce(wallet, network, tx.Nonce())
+        // update txs
+        wm.setTx(wallet, network, tx)
+        return nil</span>
+}
+
+func (wm *WalletManager) BroadcastTx(
+        tx *types.Transaction,
+) (hash string, broadcasted bool, err BroadcastError) <span class="cov8" title="1">{
+        network, networkErr := networks.GetNetworkByID(tx.ChainId().Uint64())
+        // TODO: handle chainId 0 for old txs
+        if networkErr != nil </span><span class="cov0" title="0">{
+                return "", false, BroadcastError(fmt.Errorf("tx is encoded with unsupported ChainID: %w", networkErr))
+        }</span>
+        <span class="cov8" title="1">b, broadcasterErr := wm.Broadcaster(network)
+        if broadcasterErr != nil </span><span class="cov0" title="0">{
+                return "", false, BroadcastError(fmt.Errorf("couldn't get broadcaster: %w", broadcasterErr))
+        }</span>
+        <span class="cov8" title="1">hash, broadcasted, allErrors := b.BroadcastTx(tx)
+        if broadcasted </span><span class="cov8" title="1">{
+                regErr := wm.registerBroadcastedTx(tx, network)
+                if regErr != nil </span><span class="cov0" title="0">{
+                        return "", false, BroadcastError(fmt.Errorf("couldn't register broadcasted tx in context manager: %w", regErr))
+                }</span>
+        }
+        <span class="cov8" title="1">return hash, broadcasted, NewBroadcastError(allErrors)</span>
+}
+
+func (wm *WalletManager) BroadcastTxSync(
+        tx *types.Transaction,
+) (receipt *types.Receipt, err error) <span class="cov8" title="1">{
+        network, networkErr := networks.GetNetworkByID(tx.ChainId().Uint64())
+        if networkErr != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("tx is encoded with unsupported ChainID: %w", networkErr)
+        }</span>
+        <span class="cov8" title="1">b, broadcasterErr := wm.Broadcaster(network)
+        if broadcasterErr != nil </span><span class="cov0" title="0">{
+                return nil, NewBroadcastError(fmt.Errorf("couldn't get broadcaster: %w", broadcasterErr))
+        }</span>
+        <span class="cov8" title="1">receipt, err = b.BroadcastTxSync(tx)
+        if err != nil </span><span class="cov8" title="1">{
+                return nil, NewBroadcastError(fmt.Errorf("couldn't broadcast sync tx: %w", err))
+        }</span>
+        <span class="cov8" title="1">err = wm.registerBroadcastedTx(tx, network)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, NewBroadcastError(fmt.Errorf("couldn't register broadcasted tx in context manager: %w", err))
+        }</span>
+        <span class="cov8" title="1">return receipt, nil</span>
+}
+
+// createErrorDecoder creates an error decoder from ABIs if available
+func (wm *WalletManager) createErrorDecoder(abis []abi.ABI) *ErrorDecoder <span class="cov8" title="1">{
+        if len(abis) == 0 </span><span class="cov8" title="1">{
+                return nil
+        }</span>
+
+        <span class="cov0" title="0">errDecoder, err := NewErrorDecoder(abis...)
+        if err != nil </span><span class="cov0" title="0">{
+                logger.WithFields(logger.Fields{
+                        "error": err,
+                }).Error("Failed to create error decoder. Ignore and continue")
+                return nil
+        }</span>
+        <span class="cov0" title="0">return errDecoder</span>
+}
+
+// MonitorTx non-blocking way to monitor the tx status, it returns a channel that will be closed when the tx monitoring is done
+// the channel is supposed to receive the following values:
+//  1. "mined" if the tx is mined
+//  2. "slow" if the tx is too slow to be mined (so receiver might want to retry with higher gas price)
+//  3. other strings if the tx failed and the reason is returned by the node or other debugging error message that the node can return
+//
+// Deprecated: Use MonitorTxContext instead for better cancellation support.
+func (wm *WalletManager) MonitorTx(tx *types.Transaction, network networks.Network, txCheckInterval time.Duration) &lt;-chan TxStatus <span class="cov0" title="0">{
+        return wm.MonitorTxContext(context.Background(), tx, network, txCheckInterval)
+}</span>
+
+// MonitorTxContext is a context-aware version of MonitorTx that supports cancellation.
+// When the context is cancelled, the monitoring goroutine will exit and close the channel.
+func (wm *WalletManager) MonitorTxContext(ctx context.Context, tx *types.Transaction, network networks.Network, txCheckInterval time.Duration) &lt;-chan TxStatus <span class="cov8" title="1">{
+        txMonitor := wm.getTxMonitor(network)
+        statusChan := make(chan TxStatus, 1) // Buffered to avoid goroutine leak on context cancellation
+        monitorChan := txMonitor.MakeWaitChannelWithInterval(tx.Hash().Hex(), txCheckInterval)
+        go func() </span><span class="cov8" title="1">{
+                defer close(statusChan)
+                select </span>{
+                case &lt;-ctx.Done():<span class="cov8" title="1">
+                        statusChan &lt;- TxStatus{
+                                Status:  "cancelled",
+                                Receipt: nil,
+                        }</span>
+                case status := &lt;-monitorChan:<span class="cov8" title="1">
+                        switch status.Status </span>{
+                        case "done":<span class="cov8" title="1">
+                                statusChan &lt;- TxStatus{
+                                        Status:  "mined",
+                                        Receipt: status.Receipt,
+                                }</span>
+                        case "reverted":<span class="cov8" title="1">
+                                statusChan &lt;- TxStatus{
+                                        Status:  "reverted",
+                                        Receipt: status.Receipt,
+                                }</span>
+                        case "lost":<span class="cov8" title="1">
+                                statusChan &lt;- TxStatus{
+                                        Status:  "lost",
+                                        Receipt: nil,
+                                }</span>
+                        default:<span class="cov0" title="0"></span>
+                                // ignore other statuses
+                        }
+                case &lt;-time.After(5 * time.Second):<span class="cov0" title="0">
+                        statusChan &lt;- TxStatus{
+                                Status:  "slow",
+                                Receipt: nil,
+                        }</span>
+                }
+        }()
+        <span class="cov8" title="1">return statusChan</span>
+}
+
+func (wm *WalletManager) getTxStatuses(oldTxs map[string]*types.Transaction, network networks.Network) (statuses map[string]TxInfo, err error) <span class="cov8" title="1">{
+        result := map[string]TxInfo{}
+
+        r, readerErr := wm.Reader(network)
+        if readerErr != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("couldn't get reader for tx statuses: %w", readerErr)
+        }</span>
+
+        <span class="cov8" title="1">for _, tx := range oldTxs </span><span class="cov8" title="1">{
+                txInfo, _ := r.TxInfoFromHash(tx.Hash().Hex())
+                result[tx.Hash().Hex()] = txInfo
+        }</span>
+
+        <span class="cov8" title="1">return result, nil</span>
+}
+
+// EnsureTxWithHooks ensures the tx is broadcasted and mined, it will retry until the tx is mined.
+// This is a convenience wrapper that uses context.Background().
+// For production use, prefer EnsureTxWithHooksContext to allow cancellation.
+func (wm *WalletManager) EnsureTxWithHooks(
+        numRetries int,
+        sleepDuration time.Duration,
+        txCheckInterval time.Duration,
+        txType uint8,
+        from, to common.Address,
+        value *big.Int,
+        gasLimit uint64, extraGasLimit uint64,
+        gasPrice float64, extraGasPrice float64,
+        tipCapGwei float64, extraTipCapGwei float64,
+        maxGasPrice float64, maxTipCap float64,
+        data []byte,
+        network networks.Network,
+        beforeSignAndBroadcastHook Hook,
+        afterSignAndBroadcastHook Hook,
+        abis []abi.ABI,
+        gasEstimationFailedHook GasEstimationFailedHook,
+) (tx *types.Transaction, receipt *types.Receipt, err error) <span class="cov0" title="0">{
+        return wm.EnsureTxWithHooksContext(
+                context.Background(),
+                numRetries,
+                sleepDuration,
+                txCheckInterval,
+                txType,
+                from,
+                to,
+                value,
+                gasLimit, extraGasLimit,
+                gasPrice, extraGasPrice,
+                tipCapGwei, extraTipCapGwei,
+                maxGasPrice, maxTipCap,
+                data,
+                network,
+                beforeSignAndBroadcastHook,
+                afterSignAndBroadcastHook,
+                abis,
+                gasEstimationFailedHook,
+                nil, // simulationFailedHook
+                nil, // txMinedHook
+        )
+}</span>
+
+// EnsureTxWithHooksContext ensures the tx is broadcasted and mined, it will retry until the tx is mined.
+// The context allows the caller to cancel the operation at any point.
+//
+// It returns nil and error if:
+//  1. the tx couldn't be built
+//  2. the tx couldn't be broadcasted and get mined after numRetries retries
+//  3. the context is cancelled
+//
+// It always returns the tx that was mined, either if the tx was successful or reverted.
+//
+// Possible errors:
+//  1. ErrEstimateGasFailed
+//  2. ErrAcquireNonceFailed
+//  3. ErrGetGasSettingFailed
+//  4. ErrEnsureTxOutOfRetries
+//  5. ErrGasPriceLimitReached
+//  6. context.Canceled or context.DeadlineExceeded
+//
+// # If the caller wants to know the reason of the error, they can use errors.Is to check if the error is one of the above
+//
+// After building the tx and before signing and broadcasting, the caller can provide a function hook to receive the tx and building error,
+// if the hook returns an error, the process will be stopped and the error will be returned. If the hook returns nil, the process will continue
+// even if the tx building failed, in this case, it will retry with the same data up to numRetries times and the hook will be called again.
+//
+// After signing and broadcasting successfully, the caller can provide a function hook to receive the signed tx and broadcast error,
+// if the hook returns an error, the process will be stopped and the error will be returned. If the hook returns nil, the process will continue
+// to monitor the tx to see if the tx is mined or not. If the tx is not mined, the process will retry either with a new nonce or with higher gas
+// price and tip cap to ensure the tx is mined. Hooks will be called again in the retry process.
+func (wm *WalletManager) EnsureTxWithHooksContext(
+        ctx context.Context,
+        numRetries int,
+        sleepDuration time.Duration,
+        txCheckInterval time.Duration,
+        txType uint8,
+        from, to common.Address,
+        value *big.Int,
+        gasLimit uint64, extraGasLimit uint64,
+        gasPrice float64, extraGasPrice float64,
+        tipCapGwei float64, extraTipCapGwei float64,
+        maxGasPrice float64, maxTipCap float64,
+        data []byte,
+        network networks.Network,
+        beforeSignAndBroadcastHook Hook,
+        afterSignAndBroadcastHook Hook,
+        abis []abi.ABI,
+        gasEstimationFailedHook GasEstimationFailedHook,
+        simulationFailedHook SimulationFailedHook,
+        txMinedHook TxMinedHook,
+) (tx *types.Transaction, receipt *types.Receipt, err error) <span class="cov8" title="1">{
+        // Create execution context
+        execCtx, err := NewTxExecutionContext(
+                numRetries, sleepDuration, txCheckInterval,
+                txType, from, to, value,
+                gasLimit, extraGasLimit,
+                gasPrice, extraGasPrice,
+                tipCapGwei, extraTipCapGwei,
+                maxGasPrice, maxTipCap,
+                data, network,
+                beforeSignAndBroadcastHook, afterSignAndBroadcastHook,
+                abis, gasEstimationFailedHook,
+                simulationFailedHook, txMinedHook,
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, nil, err
+        }</span>
+
+        // Cleanup function to release nonce if we exit with an error and no tx was broadcast
+        <span class="cov8" title="1">defer func() </span><span class="cov8" title="1">{
+                if err != nil &amp;&amp; len(execCtx.OldTxs) == 0 &amp;&amp; execCtx.RetryNonce != nil </span><span class="cov0" title="0">{
+                        // We have a reserved nonce but no tx was ever broadcast - release it
+                        wm.ReleaseNonce(from, network, execCtx.RetryNonce.Uint64())
+                }</span>
+        }()
+
+        // Create error decoder
+        <span class="cov8" title="1">errDecoder := wm.createErrorDecoder(execCtx.ABIs)
+
+        // Main execution loop
+        for </span><span class="cov8" title="1">{
+                // Check for context cancellation before each iteration
+                select </span>{
+                case &lt;-ctx.Done():<span class="cov0" title="0">
+                        err = ctx.Err()
+                        return nil, nil, err</span>
+                default:<span class="cov8" title="1"></span>
+                }
+
+                // Only sleep after actual retry attempts, not slow monitoring
+                <span class="cov8" title="1">if execCtx.ActualRetryCount &gt; 0 </span><span class="cov8" title="1">{
+                        // Use a timer so we can also check for context cancellation during sleep
+                        sleepTimer := time.NewTimer(execCtx.SleepDuration)
+                        select </span>{
+                        case &lt;-ctx.Done():<span class="cov0" title="0">
+                                sleepTimer.Stop()
+                                err = ctx.Err()
+                                return nil, nil, err</span>
+                        case &lt;-sleepTimer.C:<span class="cov8" title="1"></span>
+                        }
+                }
+
+                // Execute transaction attempt
+                <span class="cov8" title="1">result := wm.executeTransactionAttempt(ctx, execCtx, errDecoder)
+
+                if result.ShouldReturn </span><span class="cov8" title="1">{
+                        err = result.Error
+                        return result.Transaction, result.Receipt, err
+                }</span>
+                <span class="cov8" title="1">if result.ShouldRetry </span><span class="cov8" title="1">{
+                        continue</span>
+                }
+
+                // Monitor and handle the transaction (only if we have a transaction to monitor)
+                // in this case, result.Receipt can be filled already because of this rpc https://www.quicknode.com/docs/arbitrum/eth_sendRawTransactionSync
+                <span class="cov8" title="1">if result.Transaction != nil &amp;&amp; result.Receipt == nil </span><span class="cov8" title="1">{
+                        statusChan := wm.MonitorTxContext(ctx, result.Transaction, execCtx.Network, execCtx.TxCheckInterval)
+
+                        // Wait for status from the context-aware monitor
+                        status := &lt;-statusChan
+                        if status.Status == "cancelled" </span><span class="cov8" title="1">{
+                                err = ctx.Err()
+                                return nil, nil, err
+                        }</span>
+                        <span class="cov8" title="1">result = wm.handleTransactionStatus(status, result.Transaction, execCtx)
+                        if result.ShouldReturn </span><span class="cov8" title="1">{
+                                err = result.Error
+                                return result.Transaction, result.Receipt, err
+                        }</span>
+                        <span class="cov8" title="1">if result.ShouldRetry </span><span class="cov8" title="1">{
+                                continue</span>
+                        }
+                }
+        }
+}
+
+// executeTransactionAttempt handles building and broadcasting a single transaction attempt
+func (wm *WalletManager) executeTransactionAttempt(ctx context.Context, execCtx *TxExecutionContext, errDecoder *ErrorDecoder) *TxExecutionResult <span class="cov8" title="1">{
+        // Build transaction
+        builtTx, err := wm.BuildTx(
+                execCtx.TxType,
+                execCtx.From,
+                execCtx.To,
+                execCtx.RetryNonce,
+                execCtx.Value,
+                execCtx.GasLimit,
+                execCtx.ExtraGasLimit,
+                execCtx.RetryGasPrice,
+                execCtx.ExtraGasPrice,
+                execCtx.RetryTipCap,
+                execCtx.ExtraTipCapGwei,
+                execCtx.Data,
+                execCtx.Network,
+        )
+
+        // Handle gas estimation failure
+        if errors.Is(err, ErrEstimateGasFailed) </span><span class="cov8" title="1">{
+                return wm.handleGasEstimationFailure(execCtx, errDecoder, err)
+        }</span>
+
+        // If builtTx is nil, skip this iteration
+        <span class="cov8" title="1">if builtTx == nil </span><span class="cov0" title="0">{
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  true,
+                        ShouldReturn: false,
+                        Error:        nil,
+                }
+        }</span>
+
+        // simulate the tx at pending state to see if it will be reverted
+        <span class="cov8" title="1">r, readerErr := wm.Reader(execCtx.Network)
+        if readerErr != nil </span><span class="cov0" title="0">{
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  false,
+                        ShouldReturn: true,
+                        Error:        errors.Join(ErrSimulatedTxFailed, fmt.Errorf("couldn't get reader for simulation: %w", readerErr)),
+                }
+        }</span>
+        <span class="cov8" title="1">_, err = r.EthCall(execCtx.From.Hex(), execCtx.To.Hex(), execCtx.Data, nil) // nil overrides = use current state
+        if err != nil </span><span class="cov8" title="1">{
+                revertData, isRevert := ethclient.RevertErrorData(err)
+                if isRevert </span><span class="cov0" title="0">{
+                        return wm.handleEthCallRevertFailure(execCtx, errDecoder, builtTx, revertData, err)
+                }</span> else<span class="cov8" title="1"> {
+                        err = errors.Join(ErrSimulatedTxFailed, fmt.Errorf("couldn't simulate tx at pending state. Detail: %w", err))
+                        logger.WithFields(logger.Fields{
+                                "tx_hash":         builtTx.Hash().Hex(),
+                                "nonce":           builtTx.Nonce(),
+                                "gas_price":       builtTx.GasPrice().String(),
+                                "tip_cap":         builtTx.GasTipCap().String(),
+                                "max_fee_per_gas": builtTx.GasFeeCap().String(),
+                                "used_sync_tx":    execCtx.Network.IsSyncTxSupported(),
+                                "error":           err,
+                        }).Debug("Tx simulation failed but not a revert error")
+                        return &amp;TxExecutionResult{
+                                Transaction:  nil,
+                                ShouldRetry:  false,
+                                ShouldReturn: true,
+                                Error:        err,
+                        }
+                }</span>
+        }
+
+        // Execute hooks and broadcast
+        <span class="cov8" title="1">result := wm.signAndBroadcastTransaction(builtTx, execCtx)
+
+        // If no transaction is set in result, use the built transaction
+        if result.Transaction == nil &amp;&amp; !result.ShouldReturn </span><span class="cov8" title="1">{
+                result.Transaction = builtTx
+        }</span>
+
+        <span class="cov8" title="1">return result</span>
+}
+
+func (wm *WalletManager) handleEthCallRevertFailure(execCtx *TxExecutionContext, errDecoder *ErrorDecoder, builtTx *types.Transaction, revertData []byte, err error) *TxExecutionResult <span class="cov0" title="0">{
+        var abiError *abi.Error
+        var revertParams any
+
+        if errDecoder != nil </span><span class="cov0" title="0">{
+                abiError, revertParams, _ = errDecoder.Decode(err)
+                err = errors.Join(ErrSimulatedTxReverted, fmt.Errorf("revert error: %s. revert params: %+v. Detail: %w", abiError.Name, revertParams, err))
+        }</span> else<span class="cov0" title="0"> {
+                err = errors.Join(ErrSimulatedTxReverted, fmt.Errorf("revert data: %s. Detail: %w", common.Bytes2Hex(revertData), err))
+        }</span>
+
+        <span class="cov0" title="0">logger.WithFields(logger.Fields{
+                "tx_hash":         builtTx.Hash().Hex(),
+                "nonce":           builtTx.Nonce(),
+                "gas_price":       builtTx.GasPrice().String(),
+                "tip_cap":         builtTx.GasTipCap().String(),
+                "max_fee_per_gas": builtTx.GasFeeCap().String(),
+                "used_sync_tx":    execCtx.Network.IsSyncTxSupported(),
+                "error":           err,
+                "revert_data":     revertData,
+        }).Debug("Tx simulation showed a revert error")
+
+        // Call simulation failed hook if set
+        if execCtx.SimulationFailedHook != nil </span><span class="cov0" title="0">{
+                shouldRetry, hookErr := execCtx.SimulationFailedHook(builtTx, revertData, abiError, revertParams, err)
+                if hookErr != nil </span><span class="cov0" title="0">{
+                        // Release nonce since we're giving up and tx was never broadcast
+                        wm.ReleaseNonce(execCtx.From, execCtx.Network, builtTx.Nonce())
+                        return &amp;TxExecutionResult{
+                                Transaction:  nil,
+                                ShouldRetry:  false,
+                                ShouldReturn: true,
+                                Error:        fmt.Errorf("simulation failed hook error: %w", hookErr),
+                        }
+                }</span>
+                <span class="cov0" title="0">if !shouldRetry </span><span class="cov0" title="0">{
+                        // Release nonce since we're giving up and tx was never broadcast
+                        wm.ReleaseNonce(execCtx.From, execCtx.Network, builtTx.Nonce())
+                        return &amp;TxExecutionResult{
+                                Transaction:  nil,
+                                ShouldRetry:  false,
+                                ShouldReturn: true,
+                                Error:        err,
+                        }
+                }</span>
+        }
+
+        // we need to persist a few calculated values here before retrying with the txs
+        <span class="cov0" title="0">execCtx.RetryNonce = big.NewInt(int64(builtTx.Nonce()))
+        execCtx.GasLimit = builtTx.Gas()
+        // we could persist the error here but then later we need to set it to nil, setting this to the error if the user is supposed to handle such error
+        return &amp;TxExecutionResult{
+                Transaction:  nil,
+                ShouldRetry:  true,
+                ShouldReturn: false,
+                Error:        nil,
+        }</span>
+}
+
+// handleGasEstimationFailure processes gas estimation failures and pending transaction checks
+func (wm *WalletManager) handleGasEstimationFailure(execCtx *TxExecutionContext, errDecoder *ErrorDecoder, err error) *TxExecutionResult <span class="cov8" title="1">{
+        // Only check old transactions if we have any
+        if len(execCtx.OldTxs) &gt; 0 </span><span class="cov8" title="1">{
+                // Check if previous transactions might have been successful
+                statuses, statusErr := wm.getTxStatuses(execCtx.OldTxs, execCtx.Network)
+                if statusErr != nil </span><span class="cov0" title="0">{
+                        logger.WithFields(logger.Fields{
+                                "error": statusErr,
+                        }).Debug("Getting tx statuses after gas estimation failure. Ignore and continue the retry loop")
+                        // Don't return immediately, proceed to hook handling
+                }</span> else<span class="cov8" title="1"> {
+                        // Check for completed transactions
+                        for txhash, status := range statuses </span><span class="cov8" title="1">{
+                                if status.Status == "done" || status.Status == "reverted" </span><span class="cov8" title="1">{
+                                        if tx, exists := execCtx.OldTxs[txhash]; exists &amp;&amp; tx != nil </span><span class="cov8" title="1">{
+                                                return &amp;TxExecutionResult{
+                                                        Transaction:  tx,
+                                                        ShouldRetry:  false,
+                                                        ShouldReturn: true,
+                                                        Error:        nil,
+                                                }
+                                        }</span>
+                                }
+                        }
+
+                        // Find highest gas price pending transaction to monitor
+                        <span class="cov0" title="0">highestGasPrice := big.NewInt(0)
+                        var bestTx *types.Transaction
+                        for txhash, status := range statuses </span><span class="cov0" title="0">{
+                                if status.Status == "pending" </span><span class="cov0" title="0">{
+                                        if tx, exists := execCtx.OldTxs[txhash]; exists &amp;&amp; tx != nil </span><span class="cov0" title="0">{
+                                                if tx.GasPrice().Cmp(highestGasPrice) &gt; 0 </span><span class="cov0" title="0">{
+                                                        highestGasPrice = tx.GasPrice()
+                                                        bestTx = tx
+                                                }</span>
+                                        }
+                                }
+                        }
+
+                        <span class="cov0" title="0">if bestTx != nil </span><span class="cov0" title="0">{
+                                // We have a pending transaction, monitor it instead of retrying
+                                logger.WithFields(logger.Fields{
+                                        "tx_hash": bestTx.Hash().Hex(),
+                                        "nonce":   bestTx.Nonce(),
+                                }).Info("Found pending transaction during gas estimation failure, monitoring it instead")
+                                // Return the transaction but don't set ShouldReturn so it goes to monitoring
+                                return &amp;TxExecutionResult{
+                                        Transaction:  bestTx,
+                                        ShouldRetry:  false,
+                                        ShouldReturn: false,
+                                        Error:        nil,
+                                }
+                        }</span>
+                }
+        }
+
+        // Handle gas estimation failed hook
+        <span class="cov8" title="1">if errDecoder != nil &amp;&amp; execCtx.GasEstimationFailedHook != nil </span><span class="cov0" title="0">{
+                abiError, revertParams, revertMsgErr := errDecoder.Decode(err)
+                hookGasLimit, hookErr := execCtx.GasEstimationFailedHook(nil, abiError, revertParams, revertMsgErr, err)
+                if hookErr != nil </span><span class="cov0" title="0">{
+                        return &amp;TxExecutionResult{
+                                Transaction:  nil,
+                                ShouldRetry:  false,
+                                ShouldReturn: true,
+                                Error:        hookErr,
+                        }
+                }</span>
+                <span class="cov0" title="0">if hookGasLimit != nil </span><span class="cov0" title="0">{
+                        execCtx.GasLimit = hookGasLimit.Uint64()
+                }</span>
+        }
+
+        // Increment retry count for gas estimation failure
+        <span class="cov8" title="1">execCtx.ActualRetryCount++
+        if execCtx.ActualRetryCount &gt; execCtx.NumRetries </span><span class="cov8" title="1">{
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  false,
+                        ShouldReturn: true,
+                        Error:        errors.Join(ErrEnsureTxOutOfRetries, fmt.Errorf("gas estimation failed after %d retries", execCtx.NumRetries)),
+                }
+        }</span>
+
+        <span class="cov8" title="1">return &amp;TxExecutionResult{
+                Transaction:  nil,
+                ShouldRetry:  true,
+                ShouldReturn: false,
+                Error:        nil,
+        }</span>
+}
+
+// signAndBroadcastTransaction handles the signing and broadcasting process
+func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult <span class="cov8" title="1">{
+        // Helper to release nonce when we fail before broadcast attempt
+        releaseNonce := func() </span><span class="cov8" title="1">{
+                // Only release if this tx is not in OldTxs (meaning it was never broadcast)
+                if _, exists := execCtx.OldTxs[tx.Hash().Hex()]; !exists </span><span class="cov8" title="1">{
+                        wm.ReleaseNonce(execCtx.From, execCtx.Network, tx.Nonce())
+                }</span>
+        }
+
+        // Execute before hook
+        <span class="cov8" title="1">if execCtx.BeforeSignAndBroadcastHook != nil </span><span class="cov8" title="1">{
+                if hookError := execCtx.BeforeSignAndBroadcastHook(tx, nil); hookError != nil </span><span class="cov8" title="1">{
+                        releaseNonce()
+                        return &amp;TxExecutionResult{
+                                Transaction:  nil,
+                                ShouldRetry:  false,
+                                ShouldReturn: true,
+                                Error:        fmt.Errorf("after tx building and before signing and broadcasting hook error: %w", hookError),
+                        }
+                }</span>
+        }
+
+        // Sign transaction
+        <span class="cov8" title="1">signedAddr, signedTx, err := wm.SignTx(execCtx.From, tx, execCtx.Network)
+        if err != nil </span><span class="cov8" title="1">{
+                releaseNonce()
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  false,
+                        ShouldReturn: true,
+                        Error:        fmt.Errorf("failed to sign transaction: %w", err),
+                }
+        }</span>
+
+        // Verify signed address matches expected address
+        <span class="cov8" title="1">if signedAddr.Cmp(execCtx.From) != 0 </span><span class="cov0" title="0">{
+                releaseNonce()
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  false,
+                        ShouldReturn: true,
+                        Error: fmt.Errorf(
+                                "signed from wrong address. You could use wrong hw or passphrase. Expected wallet: %s, signed wallet: %s",
+                                execCtx.From.Hex(),
+                                signedAddr.Hex(),
+                        ),
+                }
+        }</span>
+
+        <span class="cov8" title="1">var receipt *types.Receipt
+        var broadcastErr BroadcastError
+        var successful bool
+
+        // Broadcast transaction
+        if execCtx.Network.IsSyncTxSupported() </span><span class="cov8" title="1">{
+                receipt, broadcastErr = wm.BroadcastTxSync(signedTx)
+                if receipt != nil </span><span class="cov8" title="1">{
+                        successful = true
+                }</span>
+        } else<span class="cov8" title="1"> {
+                _, successful, broadcastErr = wm.BroadcastTx(signedTx)
+        }</span>
+
+        <span class="cov8" title="1">if signedTx != nil </span><span class="cov8" title="1">{
+                execCtx.OldTxs[signedTx.Hash().Hex()] = signedTx
+        }</span>
+
+        <span class="cov8" title="1">if !successful </span><span class="cov8" title="1">{
+                // Only log if signedTx is not nil to avoid panic
+                if signedTx != nil </span><span class="cov8" title="1">{
+                        logger.WithFields(logger.Fields{
+                                "tx_hash":         signedTx.Hash().Hex(),
+                                "nonce":           signedTx.Nonce(),
+                                "gas_price":       signedTx.GasPrice().String(),
+                                "tip_cap":         signedTx.GasTipCap().String(),
+                                "max_fee_per_gas": signedTx.GasFeeCap().String(),
+                                "used_sync_tx":    execCtx.Network.IsSyncTxSupported(),
+                                "receipt":         receipt,
+                                "error":           broadcastErr,
+                        }).Debug("Unsuccessful signing and broadcasting transaction")
+                }</span> else<span class="cov0" title="0"> {
+                        logger.WithFields(logger.Fields{
+                                "nonce":        tx.Nonce(),
+                                "gas_price":    tx.GasPrice().String(),
+                                "used_sync_tx": execCtx.Network.IsSyncTxSupported(),
+                                "receipt":      receipt,
+                                "error":        broadcastErr,
+                        }).Debug("Unsuccessful signing and broadcasting transaction (no signed tx)")
+                }</span>
+
+                <span class="cov8" title="1">return wm.handleBroadcastError(broadcastErr, tx, execCtx)</span>
+        }
+
+        // Log successful broadcast
+        <span class="cov8" title="1">logger.WithFields(logger.Fields{
+                "tx_hash":         signedTx.Hash().Hex(),
+                "nonce":           signedTx.Nonce(),
+                "gas_price":       signedTx.GasPrice().String(),
+                "tip_cap":         signedTx.GasTipCap().String(),
+                "max_fee_per_gas": signedTx.GasFeeCap().String(),
+                "used_sync_tx":    execCtx.Network.IsSyncTxSupported(),
+                "receipt":         receipt,
+        }).Info("Signed and broadcasted transaction")
+
+        // Execute after hook - convert BroadcastError to error for hook
+        var hookErr error
+        if broadcastErr != nil </span><span class="cov0" title="0">{
+                hookErr = broadcastErr
+        }</span>
+
+        <span class="cov8" title="1">if execCtx.AfterSignAndBroadcastHook != nil </span><span class="cov8" title="1">{
+                if hookError := execCtx.AfterSignAndBroadcastHook(signedTx, hookErr); hookError != nil </span><span class="cov0" title="0">{
+                        return &amp;TxExecutionResult{
+                                Transaction:  signedTx,
+                                Receipt:      receipt,
+                                ShouldRetry:  false,
+                                ShouldReturn: true,
+                                Error:        fmt.Errorf("after signing and broadcasting hook error: %w", hookError),
+                        }
+                }</span>
+        }
+
+        // in case receipt is not nil, it means the tx is broadcasted and mined using eth_sendRawTransactionSync
+        <span class="cov8" title="1">if receipt != nil </span><span class="cov8" title="1">{
+                // Call TxMinedHook if set
+                if execCtx.TxMinedHook != nil </span><span class="cov8" title="1">{
+                        if hookErr := execCtx.TxMinedHook(signedTx, receipt); hookErr != nil </span><span class="cov0" title="0">{
+                                return &amp;TxExecutionResult{
+                                        Transaction:  signedTx,
+                                        Receipt:      receipt,
+                                        ShouldRetry:  false,
+                                        ShouldReturn: true,
+                                        Error:        fmt.Errorf("tx mined hook error: %w", hookErr),
+                                }
+                        }</span>
+                }
+                <span class="cov8" title="1">return &amp;TxExecutionResult{
+                        Transaction:  signedTx,
+                        Receipt:      receipt,
+                        ShouldRetry:  false,
+                        ShouldReturn: true,
+                        Error:        nil,
+                }</span>
+        }
+
+        <span class="cov8" title="1">return &amp;TxExecutionResult{
+                Transaction:  signedTx,
+                ShouldRetry:  false,
+                ShouldReturn: false,
+                Receipt:      receipt,
+                Error:        nil,
+        }</span>
+}
+
+// handleBroadcastError processes various broadcast errors and determines retry strategy
+func (wm *WalletManager) handleBroadcastError(broadcastErr BroadcastError, tx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult <span class="cov8" title="1">{
+        // Special case: nonce is low requires checking if transaction is already mined
+        if broadcastErr == ErrNonceIsLow </span><span class="cov0" title="0">{
+                return wm.handleNonceIsLowError(tx, execCtx)
+        }</span>
+
+        // Special case: tx is known doesn't count as retry (we're just waiting for it to be mined)
+        // in this case, we need to speed up the tx by increasing the gas price and tip cap
+        // however, it should be handled by the slow status gotten from the monitor tx
+        // so we just need to retry with the same nonce
+        <span class="cov8" title="1">if broadcastErr == ErrTxIsKnown </span><span class="cov8" title="1">{
+                execCtx.RetryNonce = big.NewInt(int64(tx.Nonce()))
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  true,
+                        ShouldReturn: false,
+                        Error:        nil,
+                }
+        }</span>
+
+        // All other errors count as retry attempts
+        <span class="cov8" title="1">var errorMsg string
+        switch broadcastErr </span>{
+        case ErrInsufficientFund:<span class="cov8" title="1">
+                errorMsg = "insufficient fund"</span>
+        case ErrGasLimitIsTooLow:<span class="cov0" title="0">
+                errorMsg = "gas limit too low"</span>
+        default:<span class="cov0" title="0">
+                errorMsg = fmt.Sprintf("broadcast error: %v", broadcastErr)</span>
+        }
+
+        <span class="cov8" title="1">if result := execCtx.IncrementRetryCountAndCheck(errorMsg); result != nil </span><span class="cov8" title="1">{
+                return result
+        }</span>
+
+        // Keep the same nonce for retry
+        <span class="cov8" title="1">execCtx.RetryNonce = big.NewInt(int64(tx.Nonce()))
+        return &amp;TxExecutionResult{
+                Transaction:  nil,
+                ShouldRetry:  true,
+                ShouldReturn: false,
+                Error:        nil,
+        }</span>
+}
+
+// handleNonceIsLowError specifically handles the nonce is low error case
+func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult <span class="cov8" title="1">{
+
+        statuses, err := wm.getTxStatuses(execCtx.OldTxs, execCtx.Network)
+
+        if err != nil </span><span class="cov0" title="0">{
+                logger.WithFields(logger.Fields{
+                        "error": err,
+                }).Debug("Getting tx statuses in case where tx wasn't broadcasted because nonce is too low. Ignore and continue the retry loop")
+
+                if result := execCtx.IncrementRetryCountAndCheck("nonce is low and status check failed"); result != nil </span><span class="cov0" title="0">{
+                        return result
+                }</span>
+
+                <span class="cov0" title="0">return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  true,
+                        ShouldReturn: false,
+                        Error:        nil,
+                }</span>
+        }
+
+        // Check if any old transaction is completed
+        <span class="cov8" title="1">for txhash, status := range statuses </span><span class="cov8" title="1">{
+                if status.Status == "done" || status.Status == "reverted" </span><span class="cov8" title="1">{
+                        if tx, exists := execCtx.OldTxs[txhash]; exists &amp;&amp; tx != nil </span><span class="cov8" title="1">{
+                                return &amp;TxExecutionResult{
+                                        Transaction:  tx,
+                                        ShouldRetry:  false,
+                                        ShouldReturn: true,
+                                        Error:        nil,
+                                }
+                        }</span>
+                }
+        }
+
+        // No completed transactions found, retry with new nonce
+        <span class="cov8" title="1">if result := execCtx.IncrementRetryCountAndCheck("nonce is low and no pending transactions"); result != nil </span><span class="cov8" title="1">{
+                return result
+        }</span>
+
+        <span class="cov8" title="1">execCtx.RetryNonce = nil
+
+        return &amp;TxExecutionResult{
+                Transaction:  nil,
+                ShouldRetry:  true,
+                ShouldReturn: false,
+                Error:        nil,
+        }</span>
+}
+
+// handleTransactionStatus processes different transaction statuses
+func (wm *WalletManager) handleTransactionStatus(status TxStatus, signedTx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult <span class="cov8" title="1">{
+        switch status.Status </span>{
+        case "mined", "reverted":<span class="cov8" title="1">
+                // Call TxMinedHook if set
+                if execCtx.TxMinedHook != nil </span><span class="cov8" title="1">{
+                        if hookErr := execCtx.TxMinedHook(signedTx, status.Receipt); hookErr != nil </span><span class="cov8" title="1">{
+                                return &amp;TxExecutionResult{
+                                        Transaction:  signedTx,
+                                        Receipt:      status.Receipt,
+                                        ShouldRetry:  false,
+                                        ShouldReturn: true,
+                                        Error:        fmt.Errorf("tx mined hook error: %w", hookErr),
+                                }
+                        }</span>
+                }
+                <span class="cov8" title="1">return &amp;TxExecutionResult{
+                        Transaction:  signedTx,
+                        Receipt:      status.Receipt,
+                        ShouldRetry:  false,
+                        ShouldReturn: true,
+                        Error:        nil,
+                }</span>
+
+        case "lost":<span class="cov8" title="1">
+                logger.WithFields(logger.Fields{
+                        "tx_hash": signedTx.Hash().Hex(),
+                }).Info("Transaction lost, retrying...")
+
+                execCtx.ActualRetryCount++
+                if execCtx.ActualRetryCount &gt; execCtx.NumRetries </span><span class="cov0" title="0">{
+                        return &amp;TxExecutionResult{
+                                Transaction:  nil,
+                                ShouldRetry:  false,
+                                ShouldReturn: true,
+                                Error:        errors.Join(ErrEnsureTxOutOfRetries, fmt.Errorf("transaction lost after %d retries", execCtx.NumRetries)),
+                        }
+                }</span>
+                <span class="cov8" title="1">execCtx.RetryNonce = nil
+
+                // Sleep will be handled in main loop based on actualRetryCount
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  true,
+                        ShouldReturn: false,
+                        Error:        nil,
+                }</span>
+
+        case "slow":<span class="cov8" title="1">
+                // Try to adjust gas prices for slow transaction
+                if execCtx.AdjustGasPricesForSlowTx(signedTx) </span><span class="cov8" title="1">{
+                        logger.WithFields(logger.Fields{
+                                "tx_hash": signedTx.Hash().Hex(),
+                        }).Info(fmt.Sprintf("Transaction slow, continuing to monitor with increased gas price by %.0f%% and tip cap by %.0f%%...",
+                                (GasPriceIncreasePercent-1)*100, (TipCapIncreasePercent-1)*100))
+
+                        // Continue retrying with adjusted gas prices
+                        return &amp;TxExecutionResult{
+                                Transaction:  nil,
+                                ShouldRetry:  true,
+                                ShouldReturn: false,
+                                Error:        nil,
+                        }
+                }</span> else<span class="cov8" title="1"> {
+                        // Limits reached - stop retrying and return error
+                        logger.WithFields(logger.Fields{
+                                "tx_hash":       signedTx.Hash().Hex(),
+                                "max_gas_price": execCtx.MaxGasPrice,
+                                "max_tip_cap":   execCtx.MaxTipCap,
+                        }).Warn("Transaction slow but gas price protection limits reached. Stopping retry attempts.")
+
+                        return &amp;TxExecutionResult{
+                                Transaction:  signedTx,
+                                ShouldRetry:  false,
+                                ShouldReturn: true,
+                                Error:        errors.Join(ErrGasPriceLimitReached, fmt.Errorf("maxGasPrice: %f, maxTipCap: %f", execCtx.MaxGasPrice, execCtx.MaxTipCap)),
+                        }
+                }</span>
+
+        default:<span class="cov0" title="0">
+                // Unknown status, treat as retry
+                return &amp;TxExecutionResult{
+                        Transaction:  nil,
+                        ShouldRetry:  true,
+                        ShouldReturn: false,
+                        Error:        nil,
+                }</span>
+        }
+}
+
+func (wm *WalletManager) EnsureTx(
+        txType uint8,
+        from, to common.Address,
+        value *big.Int,
+        gasLimit uint64,
+        extraGasLimit uint64,
+        gasPrice float64,
+        extraGasPrice float64,
+        tipCapGwei float64,
+        extraTipCapGwei float64,
+        data []byte,
+        network networks.Network,
+) (tx *types.Transaction, receipt *types.Receipt, err error) <span class="cov0" title="0">{
+        return wm.EnsureTxWithHooks(
+                DefaultNumRetries,
+                DefaultSleepDuration,
+                DefaultTxCheckInterval,
+                txType,
+                from,
+                to,
+                value,
+                gasLimit, extraGasLimit,
+                gasPrice, extraGasPrice,
+                tipCapGwei, extraTipCapGwei,
+                0, 0, // Default maxGasPrice and maxTipCap (0 means no limit)
+                data,
+                network,
+                nil,
+                nil,
+                nil,
+                nil,
+        )
+}</span>
+</pre>
+		
+		<pre class="file" id="file8" style="display: none">package walletarmy
+
+import (
+        "time"
+
+        "github.com/tranvictor/jarvis/networks"
+        "github.com/tranvictor/walletarmy/idempotency"
+)
+
+// WalletManagerOption is a function that configures a WalletManager
+type WalletManagerOption func(*WalletManager)
+
+// WithIdempotencyStore sets a custom idempotency store
+func WithIdempotencyStore(store idempotency.Store) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.idempotencyStore = store
+        }</span>
+}
+
+// WithDefaultIdempotencyStore sets up an in-memory idempotency store with the given TTL
+func WithDefaultIdempotencyStore(ttl time.Duration) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.idempotencyStore = idempotency.NewInMemoryStore(ttl)
+        }</span>
+}
+
+// WithDefaultNumRetries sets the default number of retries for transactions
+func WithDefaultNumRetries(numRetries int) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.NumRetries = numRetries
+        }</span>
+}
+
+// WithDefaultSleepDuration sets the default sleep duration between retries
+func WithDefaultSleepDuration(duration time.Duration) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.SleepDuration = duration
+        }</span>
+}
+
+// WithDefaultTxCheckInterval sets the default transaction check interval
+func WithDefaultTxCheckInterval(interval time.Duration) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.TxCheckInterval = interval
+        }</span>
+}
+
+// WithDefaultExtraGasLimit sets the default extra gas limit added to estimates
+func WithDefaultExtraGasLimit(extraGasLimit uint64) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.ExtraGasLimit = extraGasLimit
+        }</span>
+}
+
+// WithDefaultExtraGasPrice sets the default extra gas price added to suggestions
+func WithDefaultExtraGasPrice(extraGasPrice float64) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.ExtraGasPrice = extraGasPrice
+        }</span>
+}
+
+// WithDefaultExtraTipCap sets the default extra tip cap added to suggestions
+func WithDefaultExtraTipCap(extraTipCap float64) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.ExtraTipCapGwei = extraTipCap
+        }</span>
+}
+
+// WithDefaultMaxGasPrice sets the default maximum gas price protection limit
+func WithDefaultMaxGasPrice(maxGasPrice float64) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.MaxGasPrice = maxGasPrice
+        }</span>
+}
+
+// WithDefaultMaxTipCap sets the default maximum tip cap protection limit
+func WithDefaultMaxTipCap(maxTipCap float64) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.MaxTipCap = maxTipCap
+        }</span>
+}
+
+// WithDefaultNetwork sets the default network for transactions
+func WithDefaultNetwork(network networks.Network) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.Network = network
+        }</span>
+}
+
+// WithDefaultTxType sets the default transaction type
+func WithDefaultTxType(txType uint8) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults.TxType = txType
+        }</span>
+}
+
+// WithDefaults sets all default configuration at once
+func WithDefaults(defaults ManagerDefaults) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.defaults = defaults
+        }</span>
+}
+
+// WithReaderFactory sets a custom reader factory for testing or alternative implementations
+func WithReaderFactory(factory NetworkReaderFactory) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.readerFactory = factory
+        }</span>
+}
+
+// WithBroadcasterFactory sets a custom broadcaster factory for testing or alternative implementations
+func WithBroadcasterFactory(factory NetworkBroadcasterFactory) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.broadcasterFactory = factory
+        }</span>
+}
+
+// WithTxMonitorFactory sets a custom tx monitor factory for testing or alternative implementations
+func WithTxMonitorFactory(factory NetworkTxMonitorFactory) WalletManagerOption <span class="cov8" title="1">{
+        return func(wm *WalletManager) </span><span class="cov8" title="1">{
+                wm.txMonitorFactory = factory
+        }</span>
+}
+</pre>
+		
+		<pre class="file" id="file9" style="display: none">package walletarmy
+
+import (
+        "context"
+        "math/big"
+        "time"
+
+        "github.com/ethereum/go-ethereum/accounts/abi"
+        "github.com/ethereum/go-ethereum/common"
+        "github.com/ethereum/go-ethereum/core/types"
+        "github.com/tranvictor/jarvis/networks"
+        "github.com/tranvictor/walletarmy/idempotency"
+)
+
+// TxRequest represents a transaction request with builder pattern
+type TxRequest struct {
+        wm *WalletManager
+
+        numRetries      int
+        sleepDuration   time.Duration
+        txCheckInterval time.Duration
+
+        // Transaction parameters
+        txType          uint8
+        from, to        common.Address
+        value           *big.Int
+        gasLimit        uint64
+        extraGasLimit   uint64
+        gasPrice        float64
+        extraGasPrice   float64
+        tipCapGwei      float64
+        extraTipCapGwei float64
+        maxGasPrice     float64
+        maxTipCap       float64
+        data            []byte
+        network         networks.Network
+
+        // Hooks
+        beforeSignAndBroadcastHook Hook
+        afterSignAndBroadcastHook  Hook
+        gasEstimationFailedHook    GasEstimationFailedHook
+        simulationFailedHook       SimulationFailedHook
+        txMinedHook                TxMinedHook
+        abis                       []abi.ABI
+
+        // Idempotency key for preventing duplicate transactions
+        idempotencyKey string
+}
+
+// R creates a new transaction request (similar to go-resty's R() method).
+// The request inherits default configuration from the WalletManager.
+func (wm *WalletManager) R() *TxRequest <span class="cov8" title="1">{
+        // Use Defaults() to safely read with lock
+        defaults := wm.Defaults()
+
+        // Determine default network
+        network := defaults.Network
+        if network == nil </span><span class="cov8" title="1">{
+                network = networks.EthereumMainnet
+        }</span>
+
+        <span class="cov8" title="1">return &amp;TxRequest{
+                wm:              wm,
+                value:           big.NewInt(0),
+                network:         network,
+                numRetries:      defaults.NumRetries,
+                sleepDuration:   defaults.SleepDuration,
+                txCheckInterval: defaults.TxCheckInterval,
+                txType:          defaults.TxType,
+                extraGasLimit:   defaults.ExtraGasLimit,
+                extraGasPrice:   defaults.ExtraGasPrice,
+                extraTipCapGwei: defaults.ExtraTipCapGwei,
+                maxGasPrice:     defaults.MaxGasPrice,
+                maxTipCap:       defaults.MaxTipCap,
+        }</span>
+}
+
+// SetNumRetries sets the number of retries
+func (r *TxRequest) SetNumRetries(numRetries int) *TxRequest <span class="cov8" title="1">{
+        r.numRetries = numRetries
+        return r
+}</span>
+
+// SetSleepDuration sets the sleep duration
+func (r *TxRequest) SetSleepDuration(sleepDuration time.Duration) *TxRequest <span class="cov8" title="1">{
+        r.sleepDuration = sleepDuration
+        return r
+}</span>
+
+// SetTxCheckInterval sets the transaction check interval
+func (r *TxRequest) SetTxCheckInterval(txCheckInterval time.Duration) *TxRequest <span class="cov8" title="1">{
+        r.txCheckInterval = txCheckInterval
+        return r
+}</span>
+
+// SetTxType sets the transaction type
+func (r *TxRequest) SetTxType(txType uint8) *TxRequest <span class="cov8" title="1">{
+        r.txType = txType
+        return r
+}</span>
+
+// SetFrom sets the from address
+func (r *TxRequest) SetFrom(from common.Address) *TxRequest <span class="cov8" title="1">{
+        r.from = from
+        return r
+}</span>
+
+// SetTo sets the to address
+func (r *TxRequest) SetTo(to common.Address) *TxRequest <span class="cov8" title="1">{
+        r.to = to
+        return r
+}</span>
+
+// SetValue sets the transaction value
+func (r *TxRequest) SetValue(value *big.Int) *TxRequest <span class="cov8" title="1">{
+        if value != nil </span><span class="cov8" title="1">{
+                r.value = value
+        }</span>
+        <span class="cov8" title="1">return r</span>
+}
+
+// SetGasLimit sets the gas limit
+func (r *TxRequest) SetGasLimit(gasLimit uint64) *TxRequest <span class="cov8" title="1">{
+        r.gasLimit = gasLimit
+        return r
+}</span>
+
+// SetExtraGasLimit sets the extra gas limit
+func (r *TxRequest) SetExtraGasLimit(extraGasLimit uint64) *TxRequest <span class="cov8" title="1">{
+        r.extraGasLimit = extraGasLimit
+        return r
+}</span>
+
+// SetGasPrice sets the gas price
+func (r *TxRequest) SetGasPrice(gasPrice float64) *TxRequest <span class="cov8" title="1">{
+        r.gasPrice = gasPrice
+        return r
+}</span>
+
+// SetExtraGasPrice sets the extra gas price
+func (r *TxRequest) SetExtraGasPrice(extraGasPrice float64) *TxRequest <span class="cov8" title="1">{
+        r.extraGasPrice = extraGasPrice
+        return r
+}</span>
+
+// SetTipCapGwei sets the tip cap in gwei
+func (r *TxRequest) SetTipCapGwei(tipCapGwei float64) *TxRequest <span class="cov8" title="1">{
+        r.tipCapGwei = tipCapGwei
+        return r
+}</span>
+
+// SetExtraTipCapGwei sets the extra tip cap in gwei
+func (r *TxRequest) SetExtraTipCapGwei(extraTipCapGwei float64) *TxRequest <span class="cov8" title="1">{
+        r.extraTipCapGwei = extraTipCapGwei
+        return r
+}</span>
+
+// SetMaxGasPrice sets the maximum gas price limit
+func (r *TxRequest) SetMaxGasPrice(maxGasPrice float64) *TxRequest <span class="cov8" title="1">{
+        r.maxGasPrice = maxGasPrice
+        return r
+}</span>
+
+// SetMaxTipCap sets the maximum tip cap limit
+func (r *TxRequest) SetMaxTipCap(maxTipCap float64) *TxRequest <span class="cov8" title="1">{
+        r.maxTipCap = maxTipCap
+        return r
+}</span>
+
+// SetData sets the transaction data
+func (r *TxRequest) SetData(data []byte) *TxRequest <span class="cov8" title="1">{
+        r.data = data
+        return r
+}</span>
+
+// SetNetwork sets the network
+func (r *TxRequest) SetNetwork(network networks.Network) *TxRequest <span class="cov8" title="1">{
+        r.network = network
+        return r
+}</span>
+
+// SetAbis sets the abis
+func (r *TxRequest) SetAbis(abis ...abi.ABI) *TxRequest <span class="cov8" title="1">{
+        r.abis = abis
+        return r
+}</span>
+
+// SetBeforeSignAndBroadcastHook sets the hook to be called before signing and broadcasting
+func (r *TxRequest) SetBeforeSignAndBroadcastHook(hook Hook) *TxRequest <span class="cov8" title="1">{
+        r.beforeSignAndBroadcastHook = hook
+        return r
+}</span>
+
+// SetAfterSignAndBroadcastHook sets the hook to be called after signing and broadcasting
+func (r *TxRequest) SetAfterSignAndBroadcastHook(hook Hook) *TxRequest <span class="cov8" title="1">{
+        r.afterSignAndBroadcastHook = hook
+        return r
+}</span>
+
+// SetGasEstimationFailedHook sets the hook to be called when gas estimation fails
+func (r *TxRequest) SetGasEstimationFailedHook(hook GasEstimationFailedHook) *TxRequest <span class="cov8" title="1">{
+        r.gasEstimationFailedHook = hook
+        return r
+}</span>
+
+// SetSimulationFailedHook sets the hook to be called when eth_call simulation fails.
+// This hook is called when the transaction would revert, allowing the caller to decide
+// whether to retry or handle the error.
+func (r *TxRequest) SetSimulationFailedHook(hook SimulationFailedHook) *TxRequest <span class="cov8" title="1">{
+        r.simulationFailedHook = hook
+        return r
+}</span>
+
+// SetTxMinedHook sets the hook to be called when a transaction is mined.
+// This hook is called for both successful and reverted transactions.
+func (r *TxRequest) SetTxMinedHook(hook TxMinedHook) *TxRequest <span class="cov8" title="1">{
+        r.txMinedHook = hook
+        return r
+}</span>
+
+// SetIdempotencyKey sets a unique key to prevent duplicate transaction submissions.
+// If the same key is used again, the previous transaction result will be returned
+// instead of submitting a new transaction.
+// Requires an IdempotencyStore to be configured on the WalletManager.
+func (r *TxRequest) SetIdempotencyKey(key string) *TxRequest <span class="cov8" title="1">{
+        r.idempotencyKey = key
+        return r
+}</span>
+
+// Execute executes the transaction request using a background context.
+// For production use, prefer ExecuteContext to allow cancellation.
+func (r *TxRequest) Execute() (*types.Transaction, *types.Receipt, error) <span class="cov8" title="1">{
+        return r.ExecuteContext(context.Background())
+}</span>
+
+// ExecuteContext executes the transaction request with context support.
+// The context allows the caller to cancel long-running retry loops.
+func (r *TxRequest) ExecuteContext(ctx context.Context) (*types.Transaction, *types.Receipt, error) <span class="cov8" title="1">{
+        // Validate required fields before starting
+        if r.from == (common.Address{}) </span><span class="cov8" title="1">{
+                return nil, nil, ErrFromAddressZero
+        }</span>
+        <span class="cov8" title="1">if r.network == nil </span><span class="cov8" title="1">{
+                return nil, nil, ErrNetworkNil
+        }</span>
+
+        // Handle idempotency if a key is provided and store is configured
+        <span class="cov8" title="1">if r.idempotencyKey != "" &amp;&amp; r.wm.idempotencyStore != nil </span><span class="cov8" title="1">{
+                return r.executeWithIdempotency(ctx)
+        }</span>
+
+        <span class="cov8" title="1">return r.executeInternal(ctx)</span>
+}
+
+// executeWithIdempotency handles idempotent execution
+func (r *TxRequest) executeWithIdempotency(ctx context.Context) (*types.Transaction, *types.Receipt, error) <span class="cov8" title="1">{
+        store := r.wm.idempotencyStore
+
+        // Try to get existing record
+        existing, err := store.Get(r.idempotencyKey)
+        if err == nil </span><span class="cov8" title="1">{
+                // Record exists - check status
+                switch existing.Status </span>{
+                case idempotency.StatusConfirmed:<span class="cov8" title="1">
+                        // Already completed successfully
+                        return existing.Transaction, existing.Receipt, nil</span>
+                case idempotency.StatusFailed:<span class="cov8" title="1">
+                        // Previously failed - return the error
+                        return existing.Transaction, existing.Receipt, existing.Error</span>
+                case idempotency.StatusPending, idempotency.StatusSubmitted:<span class="cov8" title="1">
+                        // Still in progress - return duplicate error
+                        return existing.Transaction, existing.Receipt, idempotency.ErrDuplicateKey</span>
+                }
+        }
+
+        // Create new record
+        <span class="cov0" title="0">record, err := store.Create(r.idempotencyKey)
+        if err == idempotency.ErrDuplicateKey </span><span class="cov0" title="0">{
+                // Race condition - another request created the record
+                return record.Transaction, record.Receipt, idempotency.ErrDuplicateKey
+        }</span>
+        <span class="cov0" title="0">if err != nil </span><span class="cov0" title="0">{
+                return nil, nil, err
+        }</span>
+
+        // Execute the transaction
+        <span class="cov0" title="0">tx, receipt, txErr := r.executeInternal(ctx)
+
+        // Update the record with results
+        record.Transaction = tx
+        record.Receipt = receipt
+        record.Error = txErr
+
+        if tx != nil </span><span class="cov0" title="0">{
+                record.TxHash = tx.Hash()
+        }</span>
+
+        <span class="cov0" title="0">if txErr != nil </span><span class="cov0" title="0">{
+                record.Status = idempotency.StatusFailed
+        }</span> else<span class="cov0" title="0"> if receipt != nil </span><span class="cov0" title="0">{
+                record.Status = idempotency.StatusConfirmed
+        }</span> else<span class="cov0" title="0"> {
+                record.Status = idempotency.StatusSubmitted
+        }</span>
+
+        // Best effort update - don't fail the transaction if update fails
+        <span class="cov0" title="0">_ = store.Update(record)
+
+        return tx, receipt, txErr</span>
+}
+
+// executeInternal performs the actual transaction execution
+func (r *TxRequest) executeInternal(ctx context.Context) (*types.Transaction, *types.Receipt, error) <span class="cov8" title="1">{
+        return r.wm.EnsureTxWithHooksContext(
+                ctx,
+                r.numRetries,
+                r.sleepDuration,
+                r.txCheckInterval,
+                r.txType,
+                r.from,
+                r.to,
+                r.value,
+                r.gasLimit, r.extraGasLimit,
+                r.gasPrice, r.extraGasPrice,
+                r.tipCapGwei, r.extraTipCapGwei,
+                r.maxGasPrice, r.maxTipCap,
+                r.data,
+                r.network,
+                r.beforeSignAndBroadcastHook,
+                r.afterSignAndBroadcastHook,
+                r.abis,
+                r.gasEstimationFailedHook,
+                r.simulationFailedHook,
+                r.txMinedHook,
+        )
+}</span>
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
