@@ -897,8 +897,21 @@ func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, execCtx *T
 	for txhash, status := range statuses {
 		if status.Status == "done" || status.Status == "reverted" {
 			if tx, exists := execCtx.OldTxs[txhash]; exists && tx != nil {
+				// Call TxMinedHook if set (same as handleTransactionStatus)
+				if execCtx.TxMinedHook != nil {
+					if hookErr := execCtx.TxMinedHook(tx, status.Receipt); hookErr != nil {
+						return &TxExecutionResult{
+							Transaction:  tx,
+							Receipt:      status.Receipt,
+							ShouldRetry:  false,
+							ShouldReturn: true,
+							Error:        fmt.Errorf("tx mined hook error: %w", hookErr),
+						}
+					}
+				}
 				return &TxExecutionResult{
 					Transaction:  tx,
+					Receipt:      status.Receipt, // Include the receipt!
 					ShouldRetry:  false,
 					ShouldReturn: true,
 					Error:        nil,
