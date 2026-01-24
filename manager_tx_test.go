@@ -520,6 +520,47 @@ func TestHandleBroadcastError_NonceTooLow_ChecksOldTxs(t *testing.T) {
 	assert.Nil(t, result.Error)
 }
 
+func TestHandleNonceIsLowError_TxMinedHook_Called(t *testing.T) {
+	setup := newTestSetup(t)
+
+	oldTx := newTestTx(5, testAddr2, oneEth)
+	oldReceipt := newSuccessReceipt(oldTx)
+
+	setup.Reader.TxInfoFromHashFn = func(hash string) (TxInfo, error) {
+		if hash == oldTx.Hash().Hex() {
+			return TxInfo{Status: "done", Receipt: oldReceipt}, nil
+		}
+		return TxInfo{Status: "pending"}, nil
+	}
+
+	hookCalled := false
+	var receivedTx *types.Transaction
+	var receivedReceipt *types.Receipt
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		OldTxs: map[string]*types.Transaction{
+			oldTx.Hash().Hex(): oldTx,
+		},
+		Network: networks.EthereumMainnet,
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			hookCalled = true
+			receivedTx = tx
+			receivedReceipt = r
+			return nil
+		},
+	}
+
+	newTx := newTestTx(6, testAddr2, oneEth)
+	result := setup.WM.handleNonceIsLowError(newTx, execCtx)
+
+	assert.True(t, hookCalled, "TxMinedHook should be called when old tx is mined")
+	assert.Equal(t, oldTx, receivedTx)
+	assert.Equal(t, oldReceipt, receivedReceipt)
+	assert.True(t, result.ShouldReturn)
+	assert.Equal(t, oldTx, result.Transaction)
+}
+
 func TestHandleBroadcastError_TxIsKnown_RetriesWithSameNonce(t *testing.T) {
 	setup := newTestSetup(t)
 
@@ -745,6 +786,47 @@ func TestHandleGasEstimationFailure_ExceedsRetries(t *testing.T) {
 	assert.True(t, errors.Is(result.Error, ErrEnsureTxOutOfRetries))
 }
 
+func TestHandleGasEstimationFailure_TxMinedHook_Called(t *testing.T) {
+	setup := newTestSetup(t)
+
+	oldTx := newTestTx(5, testAddr2, oneEth)
+	oldReceipt := newSuccessReceipt(oldTx)
+
+	setup.Reader.TxInfoFromHashFn = func(hash string) (TxInfo, error) {
+		if hash == oldTx.Hash().Hex() {
+			return TxInfo{Status: "done", Receipt: oldReceipt}, nil
+		}
+		return TxInfo{Status: "pending"}, nil
+	}
+
+	hookCalled := false
+	var receivedTx *types.Transaction
+	var receivedReceipt *types.Receipt
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		OldTxs: map[string]*types.Transaction{
+			oldTx.Hash().Hex(): oldTx,
+		},
+		Network: networks.EthereumMainnet,
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			hookCalled = true
+			receivedTx = tx
+			receivedReceipt = r
+			return nil
+		},
+	}
+
+	err := errors.Join(ErrEstimateGasFailed, errors.New("execution reverted"))
+	result := setup.WM.handleGasEstimationFailure(execCtx, nil, err)
+
+	assert.True(t, hookCalled, "TxMinedHook should be called when old tx is mined")
+	assert.Equal(t, oldTx, receivedTx)
+	assert.Equal(t, oldReceipt, receivedReceipt)
+	assert.True(t, result.ShouldReturn)
+	assert.Equal(t, oldTx, result.Transaction)
+}
+
 // ============================================================
 // Simulation (EthCall) Tests
 // ============================================================
@@ -862,6 +944,165 @@ func TestHandleTransactionStatus_TxMinedHook_ReturnsError(t *testing.T) {
 	assert.True(t, result.ShouldReturn)
 	assert.Error(t, result.Error)
 	assert.Contains(t, result.Error.Error(), "hook error")
+}
+
+// ============================================================
+// handleMinedTx Tests
+// ============================================================
+
+func TestHandleMinedTx_TxMinedHook_Called_StatusDone(t *testing.T) {
+	setup := newTestSetup(t)
+
+	tx := newTestTx(5, testAddr2, oneEth)
+	receipt := newSuccessReceipt(tx)
+
+	hookCalled := false
+	var receivedTx *types.Transaction
+	var receivedReceipt *types.Receipt
+
+	execCtx := &TxExecutionContext{
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			hookCalled = true
+			receivedTx = tx
+			receivedReceipt = r
+			return nil
+		},
+	}
+
+	result := setup.WM.handleMinedTx(tx, TxInfo{Status: "done", Receipt: receipt}, execCtx)
+
+	assert.True(t, hookCalled, "TxMinedHook should be called")
+	assert.Equal(t, tx, receivedTx)
+	assert.Equal(t, receipt, receivedReceipt)
+	assert.True(t, result.ShouldReturn)
+	assert.Nil(t, result.Error)
+}
+
+func TestHandleMinedTx_TxMinedHook_Called_StatusMined(t *testing.T) {
+	setup := newTestSetup(t)
+
+	tx := newTestTx(5, testAddr2, oneEth)
+	receipt := newSuccessReceipt(tx)
+
+	hookCalled := false
+
+	execCtx := &TxExecutionContext{
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			hookCalled = true
+			return nil
+		},
+	}
+
+	result := setup.WM.handleMinedTx(tx, TxInfo{Status: "mined", Receipt: receipt}, execCtx)
+
+	assert.True(t, hookCalled, "TxMinedHook should be called")
+	assert.True(t, result.ShouldReturn)
+	assert.Nil(t, result.Error)
+}
+
+func TestHandleMinedTx_TxMinedHook_Called_StatusReverted(t *testing.T) {
+	setup := newTestSetup(t)
+
+	tx := newTestTx(5, testAddr2, oneEth)
+	receipt := newFailedReceipt(tx)
+
+	hookCalled := false
+
+	execCtx := &TxExecutionContext{
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			hookCalled = true
+			return nil
+		},
+	}
+
+	result := setup.WM.handleMinedTx(tx, TxInfo{Status: "reverted", Receipt: receipt}, execCtx)
+
+	assert.True(t, hookCalled, "TxMinedHook should be called")
+	assert.True(t, result.ShouldReturn)
+	assert.Nil(t, result.Error)
+}
+
+func TestHandleMinedTx_TxMinedHook_Called_EmptyStatus_SuccessfulReceipt(t *testing.T) {
+	setup := newTestSetup(t)
+
+	tx := newTestTx(5, testAddr2, oneEth)
+	receipt := newSuccessReceipt(tx)
+
+	hookCalled := false
+
+	execCtx := &TxExecutionContext{
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			hookCalled = true
+			return nil
+		},
+	}
+
+	result := setup.WM.handleMinedTx(tx, TxInfo{Status: "", Receipt: receipt}, execCtx)
+
+	assert.True(t, hookCalled, "TxMinedHook should be called")
+	assert.True(t, result.ShouldReturn)
+	assert.Nil(t, result.Error)
+}
+
+func TestHandleMinedTx_TxMinedHook_Called_EmptyStatus_RevertedReceipt(t *testing.T) {
+	setup := newTestSetup(t)
+
+	tx := newTestTx(5, testAddr2, oneEth)
+	receipt := newFailedReceipt(tx)
+
+	hookCalled := false
+
+	execCtx := &TxExecutionContext{
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			hookCalled = true
+			return nil
+		},
+	}
+
+	result := setup.WM.handleMinedTx(tx, TxInfo{Status: "", Receipt: receipt}, execCtx)
+
+	assert.True(t, hookCalled, "TxMinedHook should be called")
+	assert.True(t, result.ShouldReturn)
+	assert.Nil(t, result.Error)
+}
+
+func TestHandleMinedTx_TxMinedHook_ReturnsError(t *testing.T) {
+	setup := newTestSetup(t)
+
+	tx := newTestTx(5, testAddr2, oneEth)
+	receipt := newSuccessReceipt(tx)
+
+	hookError := errors.New("hook failed")
+
+	execCtx := &TxExecutionContext{
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			return hookError
+		},
+	}
+
+	result := setup.WM.handleMinedTx(tx, TxInfo{Status: "done", Receipt: receipt}, execCtx)
+
+	assert.True(t, result.ShouldReturn)
+	assert.Error(t, result.Error)
+	assert.Contains(t, result.Error.Error(), "tx mined hook error")
+}
+
+func TestHandleMinedTx_NoHook_StillReturnsSuccess(t *testing.T) {
+	setup := newTestSetup(t)
+
+	tx := newTestTx(5, testAddr2, oneEth)
+	receipt := newSuccessReceipt(tx)
+
+	execCtx := &TxExecutionContext{
+		TxMinedHook: nil,
+	}
+
+	result := setup.WM.handleMinedTx(tx, TxInfo{Status: "done", Receipt: receipt}, execCtx)
+
+	assert.True(t, result.ShouldReturn)
+	assert.Nil(t, result.Error)
+	assert.Equal(t, tx, result.Transaction)
+	assert.Equal(t, receipt, result.Receipt)
 }
 
 // ============================================================
@@ -1221,6 +1462,53 @@ func TestSignAndBroadcast_ReleasesNonce_WhenBeforeHookFails(t *testing.T) {
 	newTx, err := setup.WM.BuildTx(2, testAddr1, testAddr2, nil, oneEth, 21000, 0, 20, 0, 2, 0, nil, networks.EthereumMainnet)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(5), newTx.Nonce(), "nonce 5 should be available after release")
+}
+
+func TestSignAndBroadcastTransaction_SyncBroadcast_TxMinedHook_Called(t *testing.T) {
+	setup := setupEnsureTxTest(t)
+
+	fromAddr := crypto.PubkeyToAddress(testPrivateKey1.PublicKey)
+
+	setup.Reader.GetMinedNonceFn = func(addr string) (uint64, error) { return 5, nil }
+	setup.Reader.GetPendingNonceFn = func(addr string) (uint64, error) { return 5, nil }
+
+	expectedReceipt := &types.Receipt{
+		Status:      types.ReceiptStatusSuccessful,
+		BlockNumber: big.NewInt(12345),
+	}
+
+	// Use Arbitrum which supports sync broadcast
+	setup.Broadcaster.BroadcastTxSyncFn = func(tx *types.Transaction) (*types.Receipt, error) {
+		return expectedReceipt, nil
+	}
+
+	hookCalled := false
+	var receivedTx *types.Transaction
+	var receivedReceipt *types.Receipt
+
+	tx := newTestTxWithChainID(5, testAddr2, oneEth, chainIDArbitrum)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		From:       fromAddr,
+		To:         testAddr2,
+		Network:    networks.ArbitrumMainnet,
+		OldTxs:     make(map[string]*types.Transaction),
+		TxMinedHook: func(tx *types.Transaction, r *types.Receipt) error {
+			hookCalled = true
+			receivedTx = tx
+			receivedReceipt = r
+			return nil
+		},
+	}
+
+	result := setup.WM.signAndBroadcastTransaction(context.Background(), tx, execCtx)
+
+	assert.True(t, hookCalled, "TxMinedHook should be called when sync broadcast returns receipt")
+	assert.NotNil(t, receivedTx)
+	assert.Equal(t, expectedReceipt, receivedReceipt)
+	assert.True(t, result.ShouldReturn)
+	assert.Nil(t, result.Error)
 }
 
 func TestSimulation_ReleasesNonce_WhenHookSaysNoRetry(t *testing.T) {

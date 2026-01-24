@@ -620,12 +620,7 @@ func (wm *WalletManager) handleGasEstimationFailure(execCtx *TxExecutionContext,
 			for txhash, status := range statuses {
 				if status.Status == "done" || status.Status == "reverted" {
 					if tx, exists := execCtx.OldTxs[txhash]; exists && tx != nil {
-						return &TxExecutionResult{
-							Transaction:  tx,
-							ShouldRetry:  false,
-							ShouldReturn: true,
-							Error:        nil,
-						}
+						return wm.handleMinedTx(tx, status, execCtx)
 					}
 				}
 			}
@@ -866,32 +861,7 @@ func (wm *WalletManager) signAndBroadcastTransaction(ctx context.Context, tx *ty
 
 	// in case receipt is not nil, it means the tx is broadcasted and mined using eth_sendRawTransactionSync
 	if receipt != nil {
-		// Persist transaction status for crash recovery
-		if receipt.Status == types.ReceiptStatusSuccessful {
-			wm.persistTxMined(signedTx.Hash(), PendingTxStatusMined, receipt)
-		} else {
-			wm.persistTxMined(signedTx.Hash(), PendingTxStatusReverted, receipt)
-		}
-
-		// Call TxMinedHook if set
-		if execCtx.TxMinedHook != nil {
-			if hookErr := execCtx.TxMinedHook(signedTx, receipt); hookErr != nil {
-				return &TxExecutionResult{
-					Transaction:  signedTx,
-					Receipt:      receipt,
-					ShouldRetry:  false,
-					ShouldReturn: true,
-					Error:        fmt.Errorf("tx mined hook error: %w", hookErr),
-				}
-			}
-		}
-		return &TxExecutionResult{
-			Transaction:  signedTx,
-			Receipt:      receipt,
-			ShouldRetry:  false,
-			ShouldReturn: true,
-			Error:        nil,
-		}
+		return wm.handleMinedTx(signedTx, TxInfo{Receipt: receipt}, execCtx)
 	}
 
 	return &TxExecutionResult{
@@ -975,12 +945,7 @@ func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, execCtx *T
 	for txhash, status := range statuses {
 		if status.Status == "done" || status.Status == "reverted" {
 			if tx, exists := execCtx.OldTxs[txhash]; exists && tx != nil {
-				return &TxExecutionResult{
-					Transaction:  tx,
-					ShouldRetry:  false,
-					ShouldReturn: true,
-					Error:        nil,
-				}
+				return wm.handleMinedTx(tx, status, execCtx)
 			}
 		}
 	}
@@ -1000,36 +965,50 @@ func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, execCtx *T
 	}
 }
 
+// handleMinedTx processes a mined/completed transaction by persisting its status,
+// calling TxMinedHook if set, and returns the appropriate TxExecutionResult.
+// If txInfo.Status is empty, derives from txInfo.Receipt.Status.
+func (wm *WalletManager) handleMinedTx(tx *types.Transaction, txInfo TxInfo, execCtx *TxExecutionContext) *TxExecutionResult {
+	// Persist transaction status for crash recovery
+	switch txInfo.Status {
+	case "":
+		// Derive from receipt when status string is not available
+		if txInfo.Receipt.Status == types.ReceiptStatusSuccessful {
+			wm.persistTxMined(tx.Hash(), PendingTxStatusMined, txInfo.Receipt)
+		} else {
+			wm.persistTxMined(tx.Hash(), PendingTxStatusReverted, txInfo.Receipt)
+		}
+	case "done", "mined":
+		wm.persistTxMined(tx.Hash(), PendingTxStatusMined, txInfo.Receipt)
+	case "reverted":
+		wm.persistTxMined(tx.Hash(), PendingTxStatusReverted, txInfo.Receipt)
+	}
+
+	if execCtx.TxMinedHook != nil {
+		if hookErr := execCtx.TxMinedHook(tx, txInfo.Receipt); hookErr != nil {
+			return &TxExecutionResult{
+				Transaction:  tx,
+				Receipt:      txInfo.Receipt,
+				ShouldRetry:  false,
+				ShouldReturn: true,
+				Error:        fmt.Errorf("tx mined hook error: %w", hookErr),
+			}
+		}
+	}
+	return &TxExecutionResult{
+		Transaction:  tx,
+		Receipt:      txInfo.Receipt,
+		ShouldRetry:  false,
+		ShouldReturn: true,
+		Error:        nil,
+	}
+}
+
 // handleTransactionStatus processes different transaction statuses
 func (wm *WalletManager) handleTransactionStatus(status TxStatus, signedTx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult {
 	switch status.Status {
 	case "mined", "reverted":
-		// Persist transaction status for crash recovery
-		if status.Status == "mined" {
-			wm.persistTxMined(signedTx.Hash(), PendingTxStatusMined, status.Receipt)
-		} else {
-			wm.persistTxMined(signedTx.Hash(), PendingTxStatusReverted, status.Receipt)
-		}
-
-		// Call TxMinedHook if set
-		if execCtx.TxMinedHook != nil {
-			if hookErr := execCtx.TxMinedHook(signedTx, status.Receipt); hookErr != nil {
-				return &TxExecutionResult{
-					Transaction:  signedTx,
-					Receipt:      status.Receipt,
-					ShouldRetry:  false,
-					ShouldReturn: true,
-					Error:        fmt.Errorf("tx mined hook error: %w", hookErr),
-				}
-			}
-		}
-		return &TxExecutionResult{
-			Transaction:  signedTx,
-			Receipt:      status.Receipt,
-			ShouldRetry:  false,
-			ShouldReturn: true,
-			Error:        nil,
-		}
+		return wm.handleMinedTx(signedTx, TxInfo{Status: status.Status, Receipt: status.Receipt}, execCtx)
 
 	case "lost":
 		logger.WithFields(logger.Fields{
