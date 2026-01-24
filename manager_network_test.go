@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tranvictor/jarvis/networks"
+
 	"github.com/tranvictor/walletarmy/internal/circuitbreaker"
 )
 

@@ -121,3 +121,48 @@ func WithTxMonitorFactory(factory NetworkTxMonitorFactory) WalletManagerOption {
 		wm.txMonitorFactory = factory
 	}
 }
+
+// WithNonceStore sets a custom nonce store for persisting nonce state across restarts.
+// This enables crash recovery for nonce tracking.
+func WithNonceStore(store NonceStore) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.nonceStore = store
+	}
+}
+
+// WithTxStore sets a custom transaction store for tracking in-flight transactions.
+// This enables crash recovery for pending transactions.
+func WithTxStore(store TxStore) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.txStore = store
+	}
+}
+
+// WithNetworkResolver sets a custom network resolver for looking up networks by chain ID.
+// This is required when using custom networks that are not built into jarvis
+// (e.g., private chains, custom testnets).
+//
+// The resolver is used by:
+//   - Crash recovery (to resume pending transactions)
+//   - BroadcastTx and BroadcastTxSync (to determine which network to broadcast to)
+//
+// If not set, defaults to jarvis networks.GetNetworkByID which supports standard
+// EVM networks (Ethereum, Polygon, Arbitrum, Optimism, etc.).
+//
+// Example for custom networks:
+//
+//	wm := walletarmy.NewWalletManager(
+//	    walletarmy.WithNetworkResolver(func(chainID uint64) (networks.Network, error) {
+//	        switch chainID {
+//	        case 12345:
+//	            return myCustomNetwork, nil
+//	        default:
+//	            return networks.GetNetworkByID(chainID) // fallback to jarvis
+//	        }
+//	    }),
+//	)
+func WithNetworkResolver(resolver NetworkResolver) WalletManagerOption {
+	return func(wm *WalletManager) {
+		wm.networkResolver = resolver
+	}
+}

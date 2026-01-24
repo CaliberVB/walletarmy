@@ -277,6 +277,40 @@ networks.NewGenericOptimismNetwork(networks.GenericOptimismNetworkConfig{...})
 networks.NewGenericArbitrumNetwork(networks.GenericArbitrumNetworkConfig{...})
 ```
 
+#### Network Resolver (for Custom Networks)
+
+When you create custom networks, they work immediately with methods that accept a `network` parameter (like `EnsureTx`, `BuildTx`, etc.). However, some operations need to look up a network by chain ID:
+
+- **Crash recovery**: Resuming pending transactions after a restart
+- **BroadcastTx/BroadcastTxSync**: Broadcasting raw transactions that only contain chain ID
+
+By default, WalletArmy uses jarvis's built-in network registry, which supports standard EVM networks (Ethereum, Polygon, Arbitrum, Optimism, etc.). For custom networks, you need to provide a network resolver:
+
+```go
+// Create your custom network
+customNetwork := networks.NewGenericOptimismNetwork(networks.GenericOptimismNetworkConfig{
+    Name:    "my-private-chain",
+    ChainID: 12345,
+    // ... other config ...
+})
+
+// Provide a resolver that knows about your custom network
+wm := walletarmy.NewWalletManager(
+    walletarmy.WithNetworkResolver(func(chainID uint64) (networks.Network, error) {
+        switch chainID {
+        case 12345:
+            return customNetwork, nil
+        default:
+            // Fallback to jarvis for standard networks
+            return networks.GetNetworkByID(chainID)
+        }
+    }),
+    // ... other options ...
+)
+```
+
+If you're only using standard networks (Ethereum, Polygon, etc.), you don't need to configure a network resolver.
+
 #### Using Environment Variables for RPC URLs
 
 For production, it's recommended to use environment variables for RPC URLs:
@@ -658,6 +692,128 @@ tx2, receipt2, err2 := wm.R().
     Execute()
 // tx2 and receipt2 will be the same as tx and receipt
 ```
+
+## Persistence & Crash Recovery
+
+WalletArmy supports optional persistence for crash-resilient transaction management. This allows your application to recover gracefully after unexpected restarts.
+
+### Why Persistence?
+
+Without persistence, if your application crashes:
+- **Nonce tracking is lost**: On restart, nonces are re-queried from the network. If the RPC's pending state lags, you might reuse a nonce that was already broadcast.
+- **In-flight transactions are forgotten**: Pending transactions won't be monitored, and you won't know their final status.
+- **Idempotency is lost**: Duplicate transactions may be created if business logic retries.
+
+### Using Persistence
+
+Implement the `NonceStore` and `TxStore` interfaces, or use a provided implementation:
+
+```go
+// Option 1: Use provided SQLite store (coming in store/sqlite package)
+// import "github.com/tranvictor/walletarmy/store/sqlite"
+// nonceStore, _ := sqlite.NewNonceStore("./walletarmy.db")
+// txStore, _ := sqlite.NewTxStore("./walletarmy.db")
+
+// Option 2: Implement your own stores
+type myNonceStore struct { /* ... */ }
+func (s *myNonceStore) Get(ctx context.Context, wallet common.Address, chainID uint64) (*walletarmy.NonceState, error) { /* ... */ }
+// ... implement other methods
+
+// Configure WalletManager with stores
+wm := walletarmy.NewWalletManager(
+    walletarmy.WithNonceStore(myNonceStore),
+    walletarmy.WithTxStore(myTxStore),
+)
+```
+
+### Recovery on Startup
+
+Call `Recover()` during application startup before processing new transactions:
+
+```go
+func main() {
+    wm := walletarmy.NewWalletManager(
+        walletarmy.WithNonceStore(nonceStore),
+        walletarmy.WithTxStore(txStore),
+    )
+
+    // Recover from any previous crash
+    ctx := context.Background()
+    result, err := wm.Recover(ctx)
+    if err != nil {
+        log.Fatalf("Recovery failed: %v", err)
+    }
+
+    log.Printf("Recovery complete: %d txs recovered, %d already mined, %d dropped, %d nonces reconciled",
+        result.RecoveredTxs, result.MinedTxs, result.DroppedTxs, result.ReconciledNonces)
+
+    // Now safe to process new transactions
+    // ...
+}
+```
+
+### Recovery with Custom Options
+
+For more control over the recovery process:
+
+```go
+opts := walletarmy.RecoveryOptions{
+    ResumeMonitoring:      true,  // Resume monitoring recovered pending txs
+    TxCheckInterval:       5 * time.Second,
+    MaxConcurrentMonitors: 10,
+    
+    // Callbacks for application-specific logic
+    OnTxRecovered: func(tx *walletarmy.PendingTx) {
+        log.Printf("Recovered pending tx: %s", tx.Hash.Hex())
+    },
+    OnTxMined: func(tx *walletarmy.PendingTx, receipt *types.Receipt) {
+        log.Printf("Recovered tx was mined: %s, status: %d", tx.Hash.Hex(), receipt.Status)
+    },
+    OnTxDropped: func(tx *walletarmy.PendingTx) {
+        log.Printf("Recovered tx was dropped: %s", tx.Hash.Hex())
+        // Maybe retry the transaction
+    },
+}
+
+result, err := wm.RecoverWithOptions(ctx, opts)
+```
+
+### Persistence Interfaces
+
+**NonceStore** - Persists nonce tracking state:
+```go
+type NonceStore interface {
+    Get(ctx context.Context, wallet common.Address, chainID uint64) (*NonceState, error)
+    Save(ctx context.Context, state *NonceState) error
+    SavePendingNonce(ctx context.Context, wallet common.Address, chainID uint64, nonce uint64) error
+    AddReservedNonce(ctx context.Context, wallet common.Address, chainID uint64, nonce uint64) error
+    RemoveReservedNonce(ctx context.Context, wallet common.Address, chainID uint64, nonce uint64) error
+    ListAll(ctx context.Context) ([]*NonceState, error)
+}
+```
+
+**TxStore** - Tracks in-flight transactions:
+```go
+type TxStore interface {
+    Save(ctx context.Context, tx *PendingTx) error
+    Get(ctx context.Context, hash common.Hash) (*PendingTx, error)
+    GetByNonce(ctx context.Context, wallet common.Address, chainID uint64, nonce uint64) ([]*PendingTx, error)
+    ListPending(ctx context.Context, wallet common.Address, chainID uint64) ([]*PendingTx, error)
+    ListAllPending(ctx context.Context) ([]*PendingTx, error)
+    UpdateStatus(ctx context.Context, hash common.Hash, status PendingTxStatus, receipt *types.Receipt) error
+    Delete(ctx context.Context, hash common.Hash) error
+    DeleteOlderThan(ctx context.Context, age time.Duration) (int, error)
+}
+```
+
+### What Gets Persisted
+
+When persistence is enabled, WalletArmy automatically persists:
+
+1. **Nonce acquisitions**: When a nonce is reserved for a transaction
+2. **Nonce releases**: When an unused nonce is released
+3. **Transaction broadcasts**: When a transaction is broadcast to the network
+4. **Transaction completions**: When a transaction is mined or reverted
 
 ## Circuit Breaker
 

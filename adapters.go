@@ -129,6 +129,13 @@ func DefaultTxMonitorFactory(r EthReader) TxMonitor {
 	return nil
 }
 
+// DefaultNetworkResolver is the default resolver that uses jarvis networks.GetNetworkByID.
+// This supports standard EVM networks (Ethereum, Polygon, Arbitrum, Optimism, etc.).
+// For custom networks, use WithNetworkResolver to provide a custom resolver.
+func DefaultNetworkResolver(chainID uint64) (networks.Network, error) {
+	return networks.GetNetworkByID(chainID)
+}
+
 // jarvisReaderFromInterface extracts the underlying jarvis reader if available
 // This is needed for some internal operations that require the concrete type
 func jarvisReaderFromInterface(r EthReader) *reader.EthReader {

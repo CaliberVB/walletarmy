@@ -1,6 +1,7 @@
 package walletarmy
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 
@@ -27,7 +28,8 @@ func (wm *WalletManager) pendingNonce(wallet common.Address, network networks.Ne
 //  1. Get remote pending nonce and mined nonce from the network
 //  2. Compare with local pending nonce to determine the correct next nonce
 //  3. Atomically reserve the nonce by incrementing local pending nonce
-//  4. Return the reserved nonce
+//  4. Persist the nonce acquisition (if persistence is enabled)
+//  5. Return the reserved nonce
 func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Network) (*big.Int, error) {
 	// Get remote nonces first (before acquiring lock to avoid holding lock during network calls)
 	r, err := wm.Reader(network)
@@ -57,6 +59,9 @@ func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Ne
 		return nil, err
 	}
 
+	// Persist nonce acquisition for crash recovery
+	wm.persistNonceAcquisition(wallet, network.GetChainID(), result.Nonce)
+
 	return big.NewInt(int64(result.Nonce)), nil
 }
 
@@ -66,6 +71,8 @@ func (wm *WalletManager) acquireNonce(wallet common.Address, network networks.Ne
 // to some nodes, calling this may cause issues.
 func (wm *WalletManager) ReleaseNonce(wallet common.Address, network networks.Network, nonce uint64) {
 	wm.nonceTracker.ReleaseNonce(wallet, network.GetChainID(), network.GetName(), nonce)
+	// Persist nonce release for crash recovery
+	wm.persistNonceRelease(wallet, network.GetChainID(), nonce)
 }
 
 // nonce is deprecated: use acquireNonce instead for race-safe nonce acquisition.
@@ -73,4 +80,23 @@ func (wm *WalletManager) ReleaseNonce(wallet common.Address, network networks.Ne
 // when called concurrently for the same wallet/network.
 func (wm *WalletManager) nonce(wallet common.Address, network networks.Network) (*big.Int, error) {
 	return wm.acquireNonce(wallet, network)
+}
+
+// persistNonceAcquisition persists a nonce acquisition to the nonce store
+func (wm *WalletManager) persistNonceAcquisition(wallet common.Address, chainID uint64, nonce uint64) {
+	if wm.nonceStore == nil {
+		return
+	}
+	ctx := context.Background()
+	_ = wm.nonceStore.AddReservedNonce(ctx, wallet, chainID, nonce)
+	_ = wm.nonceStore.SavePendingNonce(ctx, wallet, chainID, nonce)
+}
+
+// persistNonceRelease persists a nonce release to the nonce store
+func (wm *WalletManager) persistNonceRelease(wallet common.Address, chainID uint64, nonce uint64) {
+	if wm.nonceStore == nil {
+		return
+	}
+	ctx := context.Background()
+	_ = wm.nonceStore.RemoveReservedNonce(ctx, wallet, chainID, nonce)
 }

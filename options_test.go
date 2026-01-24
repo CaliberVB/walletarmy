@@ -239,4 +239,49 @@ func TestNewWalletManager_SetsDefaultFactories(t *testing.T) {
 	assert.NotNil(t, wm.readerFactory)
 	assert.NotNil(t, wm.broadcasterFactory)
 	assert.NotNil(t, wm.txMonitorFactory)
+	assert.NotNil(t, wm.networkResolver)
+}
+
+func TestWithNetworkResolver(t *testing.T) {
+	customChainID := uint64(12345)
+	customNetwork := networks.EthereumMainnet // Use a real network for testing
+
+	called := false
+	resolver := func(chainID uint64) (networks.Network, error) {
+		called = true
+		if chainID == customChainID {
+			return customNetwork, nil
+		}
+		return networks.GetNetworkByID(chainID)
+	}
+
+	wm := NewWalletManager(
+		WithNetworkResolver(resolver),
+	)
+
+	// Trigger resolver call
+	network, err := wm.getNetworkByChainID(customChainID)
+
+	assert.NoError(t, err)
+	assert.True(t, called)
+	assert.Equal(t, customNetwork, network)
+}
+
+func TestDefaultNetworkResolver_UsesJarvisNetworks(t *testing.T) {
+	wm := NewWalletManager()
+
+	// Default resolver should be able to resolve standard networks
+	network, err := wm.getNetworkByChainID(1) // Ethereum mainnet
+
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(1), network.GetChainID())
+}
+
+func TestDefaultNetworkResolver_ErrorsForUnknownChainID(t *testing.T) {
+	wm := NewWalletManager()
+
+	// Default resolver should return error for unknown chain IDs
+	_, err := wm.getNetworkByChainID(999999999)
+
+	assert.Error(t, err)
 }

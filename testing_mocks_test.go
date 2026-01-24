@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient/gethclient"
 	"github.com/tranvictor/jarvis/networks"
+	"github.com/tranvictor/jarvis/util/account"
 )
 
 // ============================================================
@@ -210,6 +211,10 @@ var (
 	chainIDMain = big.NewInt(1)
 )
 
+// ============================================================
+// Transaction Builders
+// ============================================================
+
 func newTestDynamicTx(nonce uint64, to common.Address, value *big.Int, gasLimit uint64, gasTipCap, gasFeeCap *big.Int, chainID *big.Int) *types.Transaction {
 	return types.NewTx(&types.DynamicFeeTx{
 		ChainID:   chainID,
@@ -248,7 +253,7 @@ func newFailedReceipt(tx *types.Transaction) *types.Receipt {
 }
 
 // ============================================================
-// Test Helpers
+// Test Setup Helpers
 // ============================================================
 
 // testSetup contains all the mocks needed for a typical test
@@ -307,4 +312,137 @@ func newTestSetup(t *testing.T) *testSetup {
 		Broadcaster: broadcaster,
 		Monitor:     monitor,
 	}
+}
+
+// ============================================================
+// Mock Networks
+// ============================================================
+
+// mockNetwork is a configurable mock network for testing
+type mockNetwork struct {
+	chainID         uint64
+	name            string
+	syncTxSupported bool
+	blockTime       time.Duration
+	gasPrice        float64
+}
+
+func newMockNetwork(chainID uint64, name string, syncTxSupported bool) *mockNetwork {
+	blockTime := 12 * time.Second
+	gasPrice := 20.0
+	if syncTxSupported {
+		blockTime = 250 * time.Millisecond
+		gasPrice = 0.1
+	}
+	return &mockNetwork{
+		chainID:         chainID,
+		name:            name,
+		syncTxSupported: syncTxSupported,
+		blockTime:       blockTime,
+		gasPrice:        gasPrice,
+	}
+}
+
+func (m *mockNetwork) GetName() string                            { return m.name }
+func (m *mockNetwork) GetChainID() uint64                         { return m.chainID }
+func (m *mockNetwork) GetAlternativeNames() []string              { return nil }
+func (m *mockNetwork) GetNativeTokenSymbol() string               { return "ETH" }
+func (m *mockNetwork) GetNativeTokenDecimal() uint64              { return 18 }
+func (m *mockNetwork) GetBlockTime() time.Duration                { return m.blockTime }
+func (m *mockNetwork) GetNodeVariableName() string                { return "MOCK_NODE" }
+func (m *mockNetwork) GetDefaultNodes() map[string]string         { return nil }
+func (m *mockNetwork) GetBlockExplorerAPIKeyVariableName() string { return "" }
+func (m *mockNetwork) GetBlockExplorerAPIURL() string             { return "" }
+func (m *mockNetwork) RecommendedGasPrice() (float64, error)      { return m.gasPrice, nil }
+func (m *mockNetwork) GetABIString(address string) (string, error) {
+	return "", nil
+}
+func (m *mockNetwork) IsSyncTxSupported() bool   { return m.syncTxSupported }
+func (m *mockNetwork) MultiCallContract() string { return "" }
+func (m *mockNetwork) MarshalJSON() ([]byte, error) {
+	return []byte(`{"chainID":` + string(rune(m.chainID)) + `}`), nil
+}
+func (m *mockNetwork) UnmarshalJSON([]byte) error { return nil }
+
+// ============================================================
+// Sync Tx Test Setup
+// ============================================================
+
+// chainIDArbitrum is the chain ID for the mock Arbitrum network
+var chainIDArbitrum = big.NewInt(42161)
+
+// testPrivateKeyHex is the hex representation of the test private key
+const testPrivateKeyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// syncTxTestSetup extends testSetup with sync tx network-specific fields
+type syncTxTestSetup struct {
+	*testSetup
+	FromAddr common.Address // The actual address from the test account
+}
+
+// newTestSetupWithSyncNetwork creates a test setup with a network that supports sync tx
+func newTestSetupWithSyncNetwork(t *testing.T) (*syncTxTestSetup, *mockNetwork) {
+	t.Helper()
+
+	reader := &mockEthReader{
+		GetMinedNonceFn:        func(addr string) (uint64, error) { return 0, nil },
+		GetPendingNonceFn:      func(addr string) (uint64, error) { return 0, nil },
+		SuggestedGasSettingsFn: func() (float64, float64, error) { return 0.1, 0.01, nil },
+		EthCallFn: func(from, to string, data []byte, overrides *map[common.Address]gethclient.OverrideAccount) ([]byte, error) {
+			return nil, nil
+		},
+		TxInfoFromHashFn: func(hash string) (TxInfo, error) {
+			return TxInfo{Status: "pending"}, nil
+		},
+	}
+
+	broadcaster := &mockEthBroadcaster{}
+
+	monitor := &mockTxMonitor{
+		StatusToReturn: TxMonitorStatus{
+			Status: "done",
+		},
+	}
+
+	mockNet := newMockNetwork(42161, "mock-arbitrum", true)
+
+	wm := NewWalletManager(
+		WithReaderFactory(func(network networks.Network) (EthReader, error) {
+			return reader, nil
+		}),
+		WithBroadcasterFactory(func(network networks.Network) (EthBroadcaster, error) {
+			return broadcaster, nil
+		}),
+		WithTxMonitorFactory(func(r EthReader) TxMonitor {
+			return monitor
+		}),
+	)
+
+	// Set up a test account using the testPrivateKey1 hex
+	acc, err := account.NewPrivateKeyAccount(testPrivateKeyHex)
+	if err != nil {
+		t.Fatalf("Failed to create account: %v", err)
+	}
+	wm.SetAccount(acc)
+
+	// Initialize the network
+	_, err = wm.Reader(mockNet)
+	if err != nil {
+		t.Fatalf("Failed to initialize network: %v", err)
+	}
+
+	return &syncTxTestSetup{
+		testSetup: &testSetup{
+			WM:          wm,
+			Reader:      reader,
+			Broadcaster: broadcaster,
+			Monitor:     monitor,
+		},
+		FromAddr: acc.Address(),
+	}, mockNet
+}
+
+// newTestTxWithChainID creates a test transaction with a specific chain ID
+func newTestTxWithChainID(nonce uint64, to common.Address, value *big.Int, chainID *big.Int) *types.Transaction {
+	return newTestDynamicTx(nonce, to, value, 21000, twoGwei, twentyGwei, chainID)
 }

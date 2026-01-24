@@ -1207,7 +1207,7 @@ func TestSignAndBroadcast_ReleasesNonce_WhenBeforeHookFails(t *testing.T) {
 		},
 	}
 
-	result := setup.WM.signAndBroadcastTransaction(tx, execCtx)
+	result := setup.WM.signAndBroadcastTransaction(context.Background(), tx, execCtx)
 
 	assert.True(t, result.ShouldReturn)
 	assert.Error(t, result.Error)
@@ -2187,4 +2187,274 @@ func TestHandleNonceIsLowError_HashMismatch_Continues(t *testing.T) {
 	// Should retry since the matching hash is not in OldTxs
 	assert.True(t, result.ShouldRetry)
 	assert.False(t, result.ShouldReturn)
+}
+
+// ============================================================
+// Sync Tx Broadcast Tests
+// ============================================================
+
+func TestSyncBroadcast_SucceedsWithinTimeout_ReturnsReceiptImmediately(t *testing.T) {
+	setup, mockNetwork := newTestSetupWithSyncNetwork(t)
+
+	// BroadcastTxSync returns immediately with success
+	setup.Broadcaster.BroadcastTxSyncFn = func(tx *types.Transaction) (*types.Receipt, error) {
+		return &types.Receipt{
+			Status:      types.ReceiptStatusSuccessful,
+			TxHash:      tx.Hash(),
+			BlockNumber: big.NewInt(12345),
+			GasUsed:     21000,
+		}, nil
+	}
+
+	// Create a test tx with correct chain ID for mock network
+	tx := newTestTxWithChainID(0, testAddr2, oneEth, chainIDArbitrum)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 3,
+		From:       setup.FromAddr, // Use actual account address
+		To:         testAddr2,
+		Network:    mockNetwork,
+		OldTxs:     make(map[string]*types.Transaction),
+	}
+
+	result := setup.WM.signAndBroadcastTransaction(context.Background(), tx, execCtx)
+
+	// Should have receipt and should return immediately (not fall back to monitor)
+	require.NotNil(t, result.Receipt, "Should get receipt immediately from sync broadcast")
+	assert.Equal(t, types.ReceiptStatusSuccessful, result.Receipt.Status)
+	assert.True(t, result.ShouldReturn, "Should return immediately with sync broadcast success")
+	assert.False(t, result.ShouldRetry)
+
+	// Verify BroadcastTxSync was called (not BroadcastTx)
+	assert.Len(t, setup.Broadcaster.BroadcastTxSyncCalls, 1)
+	assert.Len(t, setup.Broadcaster.BroadcastTxCalls, 0, "Should not fall back to async broadcast")
+}
+
+func TestSyncBroadcast_Fails_ReturnsForRetry(t *testing.T) {
+	setup, mockNetwork := newTestSetupWithSyncNetwork(t)
+
+	// BroadcastTxSync fails
+	setup.Broadcaster.BroadcastTxSyncFn = func(tx *types.Transaction) (*types.Receipt, error) {
+		return nil, errors.New("temporary network error")
+	}
+
+	tx := newTestTxWithChainID(0, testAddr2, oneEth, chainIDArbitrum)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 3,
+		From:       setup.FromAddr,
+		To:         testAddr2,
+		Network:    mockNetwork,
+		OldTxs:     make(map[string]*types.Transaction),
+	}
+
+	result := setup.WM.signAndBroadcastTransaction(context.Background(), tx, execCtx)
+
+	// Should indicate retry is needed
+	assert.True(t, result.ShouldRetry, "Should retry after broadcast failure")
+	assert.False(t, result.ShouldReturn)
+	assert.Nil(t, result.Receipt)
+}
+
+func TestSyncBroadcast_ContextCancelled_ReturnsError(t *testing.T) {
+	setup, mockNetwork := newTestSetupWithSyncNetwork(t)
+
+	// BroadcastTxSync blocks until context is cancelled
+	setup.Broadcaster.BroadcastTxSyncFn = func(tx *types.Transaction) (*types.Receipt, error) {
+		time.Sleep(10 * time.Second) // Would block forever
+		return &types.Receipt{
+			Status: types.ReceiptStatusSuccessful,
+			TxHash: tx.Hash(),
+		}, nil
+	}
+
+	tx := newTestTxWithChainID(0, testAddr2, oneEth, chainIDArbitrum)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 3,
+		From:       setup.FromAddr,
+		To:         testAddr2,
+		Network:    mockNetwork,
+		OldTxs:     make(map[string]*types.Transaction),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result := setup.WM.signAndBroadcastTransaction(ctx, tx, execCtx)
+
+	// Should return with context error
+	require.True(t, result.ShouldReturn, "Should return when context is cancelled")
+	require.Error(t, result.Error)
+	assert.ErrorIs(t, result.Error, context.DeadlineExceeded)
+}
+
+func TestSyncBroadcast_Timeout_FallsBackToAsyncMonitoring(t *testing.T) {
+	// Override timeout for faster testing
+	originalTimeout := SyncBroadcastTimeout
+	SyncBroadcastTimeout = 50 * time.Millisecond
+	defer func() { SyncBroadcastTimeout = originalTimeout }()
+
+	setup, mockNetwork := newTestSetupWithSyncNetwork(t)
+
+	broadcastStarted := make(chan struct{}, 1)
+
+	// BroadcastTxSync blocks longer than the timeout
+	setup.Broadcaster.BroadcastTxSyncFn = func(tx *types.Transaction) (*types.Receipt, error) {
+		select {
+		case broadcastStarted <- struct{}{}:
+		default:
+		}
+		// Block for longer than the timeout
+		time.Sleep(5 * time.Second)
+		return &types.Receipt{
+			Status:      types.ReceiptStatusSuccessful,
+			TxHash:      tx.Hash(),
+			BlockNumber: big.NewInt(12345),
+		}, nil
+	}
+
+	tx := newTestTxWithChainID(0, testAddr2, oneEth, chainIDArbitrum)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 5,
+		From:       setup.FromAddr,
+		To:         testAddr2,
+		Network:    mockNetwork,
+		OldTxs:     make(map[string]*types.Transaction),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result := setup.WM.signAndBroadcastTransaction(ctx, tx, execCtx)
+
+	// After timeout, should return with:
+	// - Transaction set (it was signed)
+	// - No receipt (timed out before getting one)
+	// - ShouldReturn = false (so monitor flow kicks in)
+	// - ShouldRetry = false
+	assert.NotNil(t, result.Transaction, "Should have signed transaction")
+	assert.Nil(t, result.Receipt, "Should not have receipt after timeout")
+	assert.False(t, result.ShouldReturn, "Should not return immediately - needs to go to monitor flow")
+	assert.False(t, result.ShouldRetry)
+	assert.Nil(t, result.Error, "Timeout is not an error - it's a fallback to async monitoring")
+}
+
+func TestSyncBroadcast_ReturnsRevertedReceipt_HandledCorrectly(t *testing.T) {
+	setup, mockNetwork := newTestSetupWithSyncNetwork(t)
+
+	// BroadcastTxSync returns a reverted receipt
+	setup.Broadcaster.BroadcastTxSyncFn = func(tx *types.Transaction) (*types.Receipt, error) {
+		return &types.Receipt{
+			Status:      types.ReceiptStatusFailed,
+			TxHash:      tx.Hash(),
+			BlockNumber: big.NewInt(12345),
+			GasUsed:     21000,
+		}, nil
+	}
+
+	tx := newTestTxWithChainID(0, testAddr2, oneEth, chainIDArbitrum)
+
+	execCtx := &TxExecutionContext{
+		NumRetries: 3,
+		From:       setup.FromAddr,
+		To:         testAddr2,
+		Network:    mockNetwork,
+		OldTxs:     make(map[string]*types.Transaction),
+	}
+
+	result := setup.WM.signAndBroadcastTransaction(context.Background(), tx, execCtx)
+
+	// Should return with the reverted receipt (not an error - tx was mined)
+	require.NotNil(t, result.Receipt)
+	assert.Equal(t, types.ReceiptStatusFailed, result.Receipt.Status, "Should return the reverted receipt")
+	assert.True(t, result.ShouldReturn, "Should return with reverted receipt")
+	assert.Nil(t, result.Error, "Reverted tx is not an error - it's a valid outcome")
+}
+
+func TestSyncBroadcast_Timeout_TriggersMonitorFlow(t *testing.T) {
+	// This test verifies that when sync broadcast times out:
+	// 1. The function returns with ShouldReturn=false (triggering monitor flow)
+	// 2. The monitor is subsequently called
+
+	// Override timeout for faster testing
+	originalTimeout := SyncBroadcastTimeout
+	SyncBroadcastTimeout = 50 * time.Millisecond
+	defer func() { SyncBroadcastTimeout = originalTimeout }()
+
+	setup, mockNetwork := newTestSetupWithSyncNetwork(t)
+
+	var broadcastedTxs []*types.Transaction
+	var mu sync.Mutex
+
+	// Sync broadcast times out
+	setup.Broadcaster.BroadcastTxSyncFn = func(tx *types.Transaction) (*types.Receipt, error) {
+		mu.Lock()
+		broadcastedTxs = append(broadcastedTxs, tx)
+		mu.Unlock()
+
+		// Block until timeout
+		time.Sleep(1 * time.Second)
+		return nil, nil // Won't be reached due to timeout
+	}
+
+	// Monitor returns "done" immediately (simulating tx mined during monitor)
+	setup.Monitor.StatusToReturn = TxMonitorStatus{
+		Status:  "done",
+		Receipt: newSuccessReceipt(newTestTxWithChainID(0, testAddr2, oneEth, chainIDArbitrum)),
+	}
+
+	// Build initial tx
+	initialTx, err := setup.WM.BuildTx(
+		2, // EIP-1559
+		setup.FromAddr,
+		testAddr2,
+		nil, // nonce
+		oneEth,
+		21000, 0,
+		0, 0, // gas price (will use suggested)
+		0, 0, // tip cap (will use suggested)
+		nil, // data
+		mockNetwork,
+	)
+	require.NoError(t, err)
+
+	execCtx := &TxExecutionContext{
+		NumRetries:      5,
+		From:            setup.FromAddr,
+		To:              testAddr2,
+		Network:         mockNetwork,
+		TxType:          2,
+		Value:           oneEth,
+		GasLimit:        21000,
+		TxCheckInterval: 10 * time.Millisecond,
+		OldTxs:          make(map[string]*types.Transaction),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// First broadcast - should timeout and return for monitor flow
+	result1 := setup.WM.signAndBroadcastTransaction(ctx, initialTx, execCtx)
+	require.NotNil(t, result1.Transaction, "Should have transaction after timeout")
+	require.Nil(t, result1.Receipt, "Should not have receipt after timeout")
+	require.False(t, result1.ShouldReturn, "Should go to monitor flow, not return immediately")
+
+	// Simulate what ensureTxWithHooksContextInternal does after signAndBroadcast returns with no receipt
+	// It should call MonitorTxContext
+	statusChan := setup.WM.MonitorTxContext(ctx, result1.Transaction, mockNetwork, 10*time.Millisecond)
+	status := <-statusChan
+
+	// Monitor should return "mined" (since mock returns "done" which gets converted to "mined")
+	assert.Equal(t, "mined", status.Status, "Monitor should return mined status")
+
+	// Verify that:
+	// 1. The sync broadcast was called
+	// 2. Monitor was called after timeout
+	mu.Lock()
+	assert.Equal(t, 1, len(broadcastedTxs), "Should have called BroadcastTxSync once before timeout")
+	mu.Unlock()
+
+	assert.Len(t, setup.Monitor.MakeWaitChannelCalls, 1, "Monitor should have been called after sync timeout")
 }

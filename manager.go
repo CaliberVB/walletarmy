@@ -1,6 +1,7 @@
 package walletarmy
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -25,6 +26,11 @@ type NetworkBroadcasterFactory func(network networks.Network) (EthBroadcaster, e
 // NetworkTxMonitorFactory creates a TxMonitor for a given reader.
 // This allows injecting mock monitors for testing.
 type NetworkTxMonitorFactory func(reader EthReader) TxMonitor
+
+// NetworkResolver resolves a network by chain ID.
+// This is used by recovery and broadcast methods that need to look up a network from a chain ID.
+// The default implementation uses jarvis networks.GetNetworkByID.
+type NetworkResolver func(chainID uint64) (networks.Network, error)
 
 // WalletManager manages
 //  1. multiple wallets and their informations in its
@@ -78,10 +84,18 @@ type WalletManager struct {
 	// Idempotency store for preventing duplicate transactions
 	idempotencyStore idempotency.Store
 
+	// Persistence stores for crash recovery
+	nonceStore NonceStore
+	txStore    TxStore
+
 	// Factories for creating network components (injectable for testing)
 	readerFactory      NetworkReaderFactory
 	broadcasterFactory NetworkBroadcasterFactory
 	txMonitorFactory   NetworkTxMonitorFactory
+
+	// Network resolver for looking up networks by chain ID
+	// Used by recovery and broadcast methods
+	networkResolver NetworkResolver
 }
 
 // NewWalletManager creates a new WalletManager with optional configuration
@@ -103,6 +117,9 @@ func NewWalletManager(opts ...WalletManagerOption) *WalletManager {
 	}
 	if wm.txMonitorFactory == nil {
 		wm.txMonitorFactory = DefaultTxMonitorFactory
+	}
+	if wm.networkResolver == nil {
+		wm.networkResolver = DefaultNetworkResolver
 	}
 
 	return wm
@@ -170,4 +187,34 @@ func (wm *WalletManager) Account(wallet common.Address) *account.Account {
 		return acc.(*account.Account)
 	}
 	return nil
+}
+
+// NonceStore returns the configured nonce store, or nil if not configured
+func (wm *WalletManager) NonceStore() NonceStore {
+	return wm.nonceStore
+}
+
+// TxStore returns the configured transaction store, or nil if not configured
+func (wm *WalletManager) TxStore() TxStore {
+	return wm.txStore
+}
+
+// Recover performs recovery after a crash or restart.
+// It reconciles nonce state with the chain and resumes monitoring pending transactions.
+//
+// This should be called once during application startup before processing new transactions.
+// If no persistence stores are configured, this is a no-op.
+func (wm *WalletManager) Recover(ctx context.Context) (*RecoveryResult, error) {
+	return wm.RecoverWithOptions(ctx, DefaultRecoveryOptions())
+}
+
+// RecoverWithOptions performs recovery with custom options.
+func (wm *WalletManager) RecoverWithOptions(ctx context.Context, opts RecoveryOptions) (*RecoveryResult, error) {
+	if wm.nonceStore == nil && wm.txStore == nil {
+		// No persistence configured, nothing to recover
+		return &RecoveryResult{}, nil
+	}
+
+	handler := newRecoveryHandler(wm)
+	return handler.Recover(ctx, opts)
 }

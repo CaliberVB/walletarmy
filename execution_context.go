@@ -47,6 +47,11 @@ type TxExecutionContext struct {
 	OldTxs     map[string]*types.Transaction
 	RetryNonce *big.Int
 
+	// InitialTx is set when resuming a pending transaction.
+	// If non-nil, the first iteration skips executeTransactionAttempt and
+	// goes straight to monitoring this transaction. Cleared after first use.
+	InitialTx *types.Transaction
+
 	// Hooks
 	BeforeSignAndBroadcastHook Hook
 	AfterSignAndBroadcastHook  Hook

@@ -125,13 +125,15 @@ func (wm *WalletManager) registerBroadcastedTx(tx *types.Transaction, network ne
 	wm.setPendingNonce(wallet, network, tx.Nonce())
 	// update txs
 	wm.setTx(wallet, network, tx)
+	// persist for crash recovery
+	wm.persistTxBroadcast(tx, wallet, network.GetChainID())
 	return nil
 }
 
 func (wm *WalletManager) BroadcastTx(
 	tx *types.Transaction,
 ) (hash string, broadcasted bool, err BroadcastError) {
-	network, networkErr := networks.GetNetworkByID(tx.ChainId().Uint64())
+	network, networkErr := wm.getNetworkByChainID(tx.ChainId().Uint64())
 	// TODO: handle chainId 0 for old txs
 	if networkErr != nil {
 		return "", false, BroadcastError(fmt.Errorf("tx is encoded with unsupported ChainID: %w", networkErr))
@@ -153,7 +155,7 @@ func (wm *WalletManager) BroadcastTx(
 func (wm *WalletManager) BroadcastTxSync(
 	tx *types.Transaction,
 ) (receipt *types.Receipt, err error) {
-	network, networkErr := networks.GetNetworkByID(tx.ChainId().Uint64())
+	network, networkErr := wm.getNetworkByChainID(tx.ChainId().Uint64())
 	if networkErr != nil {
 		return nil, fmt.Errorf("tx is encoded with unsupported ChainID: %w", networkErr)
 	}
@@ -370,18 +372,29 @@ func (wm *WalletManager) EnsureTxWithHooksContext(
 		return nil, nil, err
 	}
 
+	// Create error decoder
+	errDecoder := wm.createErrorDecoder(execCtx.ABIs)
+
+	// Main execution loop - shared by both new transactions and resumed transactions
+	return wm.executeTransactionLoop(ctx, execCtx, errDecoder)
+}
+
+// executeTransactionLoop is the main execution loop for transaction processing.
+// It handles both new transactions (via executeTransactionAttempt) and resumed
+// transactions (via InitialTx). This ensures consistent retry and gas bumping logic.
+func (wm *WalletManager) executeTransactionLoop(
+	ctx context.Context,
+	execCtx *TxExecutionContext,
+	errDecoder *ErrorDecoder,
+) (tx *types.Transaction, receipt *types.Receipt, err error) {
 	// Cleanup function to release nonce if we exit with an error and no tx was broadcast
 	defer func() {
 		if err != nil && len(execCtx.OldTxs) == 0 && execCtx.RetryNonce != nil {
 			// We have a reserved nonce but no tx was ever broadcast - release it
-			wm.ReleaseNonce(from, network, execCtx.RetryNonce.Uint64())
+			wm.ReleaseNonce(execCtx.From, execCtx.Network, execCtx.RetryNonce.Uint64())
 		}
 	}()
 
-	// Create error decoder
-	errDecoder := wm.createErrorDecoder(execCtx.ABIs)
-
-	// Main execution loop
 	for {
 		// Check for context cancellation before each iteration
 		select {
@@ -392,7 +405,8 @@ func (wm *WalletManager) EnsureTxWithHooksContext(
 		}
 
 		// Only sleep after actual retry attempts, not slow monitoring
-		if execCtx.ActualRetryCount > 0 {
+		// Also skip sleep on first iteration when resuming with InitialTx
+		if execCtx.ActualRetryCount > 0 && execCtx.InitialTx == nil {
 			// Use a timer so we can also check for context cancellation during sleep
 			sleepTimer := time.NewTimer(execCtx.SleepDuration)
 			select {
@@ -404,8 +418,21 @@ func (wm *WalletManager) EnsureTxWithHooksContext(
 			}
 		}
 
-		// Execute transaction attempt
-		result := wm.executeTransactionAttempt(ctx, execCtx, errDecoder)
+		var result *TxExecutionResult
+
+		// If resuming a pending transaction, skip executeTransactionAttempt on first iteration
+		// and go straight to monitoring the existing transaction
+		if execCtx.InitialTx != nil {
+			result = &TxExecutionResult{
+				Transaction:  execCtx.InitialTx,
+				ShouldRetry:  false,
+				ShouldReturn: false,
+			}
+			execCtx.InitialTx = nil // Clear so subsequent iterations go through normal flow
+		} else {
+			// Execute transaction attempt (build/sign/broadcast)
+			result = wm.executeTransactionAttempt(ctx, execCtx, errDecoder)
+		}
 
 		if result.ShouldReturn {
 			err = result.Error
@@ -508,7 +535,7 @@ func (wm *WalletManager) executeTransactionAttempt(ctx context.Context, execCtx 
 	}
 
 	// Execute hooks and broadcast
-	result := wm.signAndBroadcastTransaction(builtTx, execCtx)
+	result := wm.signAndBroadcastTransaction(ctx, builtTx, execCtx)
 
 	// If no transaction is set in result, use the built transaction
 	if result.Transaction == nil && !result.ShouldReturn {
@@ -670,8 +697,12 @@ func (wm *WalletManager) handleGasEstimationFailure(execCtx *TxExecutionContext,
 	}
 }
 
+// SyncBroadcastTimeout is the maximum time to wait for BroadcastTxSync before falling back to async monitoring.
+// This is a variable (not const) to allow tests to override it for faster testing.
+var SyncBroadcastTimeout = 5 * time.Second
+
 // signAndBroadcastTransaction handles the signing and broadcasting process
-func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult {
+func (wm *WalletManager) signAndBroadcastTransaction(ctx context.Context, tx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult {
 	// Helper to release nonce when we fail before broadcast attempt
 	releaseNonce := func() {
 		// Only release if this tx is not in OldTxs (meaning it was never broadcast)
@@ -723,12 +754,51 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, exec
 	var receipt *types.Receipt
 	var broadcastErr BroadcastError
 	var successful bool
+	var syncBroadcastTimedOut bool
 
 	// Broadcast transaction
 	if execCtx.Network.IsSyncTxSupported() {
-		receipt, broadcastErr = wm.BroadcastTxSync(signedTx)
-		if receipt != nil {
+		// Use timeout wrapper for sync broadcast to handle slow L2s
+		// If the broadcast takes too long, we fall back to async monitoring with gas bump support
+		type syncResult struct {
+			receipt *types.Receipt
+			err     error
+		}
+		resultCh := make(chan syncResult, 1)
+
+		go func() {
+			r, e := wm.BroadcastTxSync(signedTx)
+			resultCh <- syncResult{r, e}
+		}()
+
+		select {
+		case result := <-resultCh:
+			receipt = result.receipt
+			if result.err != nil {
+				broadcastErr = NewBroadcastError(result.err)
+			}
+			if receipt != nil {
+				successful = true
+			}
+		case <-time.After(SyncBroadcastTimeout):
+			// Timeout: treat as slow tx, fall back to async monitoring
+			// The tx was already sent to the network, so we mark it as successful
+			// but with no receipt, which triggers the monitor flow
+			syncBroadcastTimedOut = true
 			successful = true
+			logger.WithFields(logger.Fields{
+				"tx_hash":         signedTx.Hash().Hex(),
+				"nonce":           signedTx.Nonce(),
+				"timeout_seconds": SyncBroadcastTimeout.Seconds(),
+			}).Warn("Sync broadcast timed out, falling back to async monitoring with gas bump support")
+		case <-ctx.Done():
+			// Context cancelled - return immediately
+			return &TxExecutionResult{
+				Transaction:  signedTx,
+				ShouldRetry:  false,
+				ShouldReturn: true,
+				Error:        ctx.Err(),
+			}
 		}
 	} else {
 		_, successful, broadcastErr = wm.BroadcastTx(signedTx)
@@ -766,13 +836,14 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, exec
 
 	// Log successful broadcast
 	logger.WithFields(logger.Fields{
-		"tx_hash":         signedTx.Hash().Hex(),
-		"nonce":           signedTx.Nonce(),
-		"gas_price":       signedTx.GasPrice().String(),
-		"tip_cap":         signedTx.GasTipCap().String(),
-		"max_fee_per_gas": signedTx.GasFeeCap().String(),
-		"used_sync_tx":    execCtx.Network.IsSyncTxSupported(),
-		"receipt":         receipt,
+		"tx_hash":                signedTx.Hash().Hex(),
+		"nonce":                  signedTx.Nonce(),
+		"gas_price":              signedTx.GasPrice().String(),
+		"tip_cap":                signedTx.GasTipCap().String(),
+		"max_fee_per_gas":        signedTx.GasFeeCap().String(),
+		"used_sync_tx":           execCtx.Network.IsSyncTxSupported(),
+		"sync_broadcast_timeout": syncBroadcastTimedOut,
+		"receipt":                receipt,
 	}).Info("Signed and broadcasted transaction")
 
 	// Execute after hook - convert BroadcastError to error for hook
@@ -795,6 +866,13 @@ func (wm *WalletManager) signAndBroadcastTransaction(tx *types.Transaction, exec
 
 	// in case receipt is not nil, it means the tx is broadcasted and mined using eth_sendRawTransactionSync
 	if receipt != nil {
+		// Persist transaction status for crash recovery
+		if receipt.Status == types.ReceiptStatusSuccessful {
+			wm.persistTxMined(signedTx.Hash(), PendingTxStatusMined, receipt)
+		} else {
+			wm.persistTxMined(signedTx.Hash(), PendingTxStatusReverted, receipt)
+		}
+
 		// Call TxMinedHook if set
 		if execCtx.TxMinedHook != nil {
 			if hookErr := execCtx.TxMinedHook(signedTx, receipt); hookErr != nil {
@@ -926,6 +1004,13 @@ func (wm *WalletManager) handleNonceIsLowError(tx *types.Transaction, execCtx *T
 func (wm *WalletManager) handleTransactionStatus(status TxStatus, signedTx *types.Transaction, execCtx *TxExecutionContext) *TxExecutionResult {
 	switch status.Status {
 	case "mined", "reverted":
+		// Persist transaction status for crash recovery
+		if status.Status == "mined" {
+			wm.persistTxMined(signedTx.Hash(), PendingTxStatusMined, status.Receipt)
+		} else {
+			wm.persistTxMined(signedTx.Hash(), PendingTxStatusReverted, status.Receipt)
+		}
+
 		// Call TxMinedHook if set
 		if execCtx.TxMinedHook != nil {
 			if hookErr := execCtx.TxMinedHook(signedTx, status.Receipt); hookErr != nil {
@@ -1044,4 +1129,124 @@ func (wm *WalletManager) EnsureTx(
 		nil,
 		nil,
 	)
+}
+
+// getNetworkByChainID is a helper to get a network by chain ID.
+// It uses the configured network resolver (defaults to jarvis networks.GetNetworkByID).
+func (wm *WalletManager) getNetworkByChainID(chainID uint64) (networks.Network, error) {
+	return wm.networkResolver(chainID)
+}
+
+// ResumePendingTransaction resumes the EnsureTx flow for a previously broadcast transaction.
+// This is used during crash recovery to continue monitoring and retry logic (including gas bumping)
+// for transactions that were pending when the application crashed.
+//
+// The pendingTx.Transaction field must be non-nil as it contains the original transaction data.
+//
+// This method enters the same execution flow as EnsureTxWithHooksContext, starting from the
+// monitoring phase. If the transaction is slow, it will bump gas and retry. If it's lost,
+// it will retry with a new nonce.
+func (wm *WalletManager) ResumePendingTransaction(
+	ctx context.Context,
+	pendingTx *PendingTx,
+	opts ResumeTransactionOptions,
+) (*types.Transaction, *types.Receipt, error) {
+	if pendingTx == nil {
+		return nil, nil, fmt.Errorf("pendingTx cannot be nil")
+	}
+	if pendingTx.Transaction == nil {
+		return nil, nil, fmt.Errorf("pendingTx.Transaction cannot be nil - transaction data is required for resume")
+	}
+
+	tx := pendingTx.Transaction
+	network, err := wm.getNetworkByChainID(pendingTx.ChainID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get network for chainID %d: %w", pendingTx.ChainID, err)
+	}
+
+	// Apply defaults
+	if opts.NumRetries <= 0 {
+		opts.NumRetries = DefaultNumRetries
+	}
+	if opts.SleepDuration <= 0 {
+		opts.SleepDuration = DefaultSleepDuration
+	}
+	if opts.TxCheckInterval <= 0 {
+		opts.TxCheckInterval = DefaultTxCheckInterval
+	}
+
+	// Extract gas settings from the existing transaction
+	gasPrice := float64(tx.GasPrice().Uint64()) / 1e9 // Convert wei to gwei
+	tipCap := float64(tx.GasTipCap().Uint64()) / 1e9  // Convert wei to gwei
+
+	// Set max limits based on original tx if not specified
+	if opts.MaxGasPrice <= 0 {
+		opts.MaxGasPrice = gasPrice * MaxCapMultiplier
+	}
+	if opts.MaxTipCap <= 0 {
+		opts.MaxTipCap = tipCap * MaxCapMultiplier
+	}
+
+	// Create execution context pre-populated with the existing transaction
+	// InitialTx is set so the loop skips executeTransactionAttempt on first iteration
+	// and goes straight to monitoring
+	execCtx := &TxExecutionContext{
+		ActualRetryCount: 0,
+		NumRetries:       opts.NumRetries,
+		SleepDuration:    opts.SleepDuration,
+		TxCheckInterval:  opts.TxCheckInterval,
+		TxType:           uint8(tx.Type()),
+		From:             pendingTx.Wallet,
+		To:               *tx.To(),
+		Value:            tx.Value(),
+		GasLimit:         tx.Gas(),
+		ExtraGasLimit:    0,
+		RetryGasPrice:    gasPrice,
+		ExtraGasPrice:    0,
+		RetryTipCap:      tipCap,
+		ExtraTipCapGwei:  0,
+		MaxGasPrice:      opts.MaxGasPrice,
+		MaxTipCap:        opts.MaxTipCap,
+		Data:             tx.Data(),
+		Network:          network,
+		OldTxs:           make(map[string]*types.Transaction),
+		RetryNonce:       big.NewInt(int64(tx.Nonce())),
+		InitialTx:        tx, // Set InitialTx to skip first executeTransactionAttempt
+		TxMinedHook:      opts.TxMinedHook,
+	}
+
+	// Pre-populate OldTxs with the pending transaction
+	execCtx.OldTxs[tx.Hash().Hex()] = tx
+
+	// Use the same execution loop as EnsureTxWithHooksContext
+	errDecoder := wm.createErrorDecoder(execCtx.ABIs)
+	return wm.executeTransactionLoop(ctx, execCtx, errDecoder)
+}
+
+// persistTxBroadcast persists a broadcasted transaction to the tx store
+func (wm *WalletManager) persistTxBroadcast(tx *types.Transaction, wallet common.Address, chainID uint64) {
+	if wm.txStore == nil {
+		return
+	}
+	ctx := context.Background()
+	ptx := &PendingTx{
+		Hash:        tx.Hash(),
+		Wallet:      wallet,
+		ChainID:     chainID,
+		Nonce:       tx.Nonce(),
+		Status:      PendingTxStatusBroadcasted,
+		Transaction: tx,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	_ = wm.txStore.Save(ctx, ptx)
+}
+
+// persistTxMined persists a mined transaction status to the tx store
+func (wm *WalletManager) persistTxMined(txHash common.Hash, status PendingTxStatus, receipt *types.Receipt) {
+	if wm.txStore == nil {
+		return
+	}
+	ctx := context.Background()
+	_ = wm.txStore.UpdateStatus(ctx, txHash, status, receipt)
 }
